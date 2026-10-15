@@ -27,6 +27,7 @@ import {
   toDisplaySpeed,
   wallBox,
   wallHalfLanes,
+  wallReachLanes,
   warningColorAt,
   warningCssAt,
   warningDistanceAt,
@@ -213,6 +214,30 @@ check('the barrier widens as the run speeds up', halfAtMax > halfAtCruise,
 check('the barrier always covers at least the reachable band',
   halfAtCruise >= WALLS.minHalfLanes && halfAtMax <= WALLS.maxHalfLanes,
   `bounded by ${WALLS.minHalfLanes}..${WALLS.maxHalfLanes} lanes`);
+// The band the ship can cross while a row is in flight is the hard lower bound on
+// the window width: if `WALLS.maxHalfLanes` ever drops below it, the clamp in
+// wallHalfLanes silently ships barriers narrow enough to fly *around*, which is
+// the one thing full-width rows must never allow. Swept over every speed the run
+// can reach (boost tops out at SPEED.max × boostMultiplier) and the whole
+// difficulty curve, not just cruise.
+const reachSweep = [];
+for (const difficulty of [0, 0.25, 0.5, 0.75, 1]) {
+  for (const speed of [SPEED.base, SPEED.base * 2, SPEED.max, SPEED.max * SPEED.boostMultiplier]) {
+    reachSweep.push({
+      difficulty,
+      speed,
+      reach: wallReachLanes({
+        warnDuration: warningDurationAt(difficulty, speed),
+        solidDuration: solidDurationAt(difficulty),
+      }),
+    });
+  }
+}
+const widestReach = reachSweep.reduce((best, r) => (r.reach > best.reach ? r : best), reachSweep[0]);
+check('the widest reachable band always fits inside the window cap',
+  reachSweep.every((r) => r.reach <= WALLS.maxHalfLanes),
+  `worst case ${widestReach.reach} lanes each side at difficulty ${widestReach.difficulty}, ` +
+    `${widestReach.speed.toFixed(0)} u/s (cap ${WALLS.maxHalfLanes})`);
 check('a narrow viewport gets a narrower (cheaper) barrier than a wide one',
   wallHalfLanes({ speed: SPEED.base, ...cruiseFlight, aspect: 0.5 }) <=
     wallHalfLanes({ speed: SPEED.base, ...cruiseFlight, aspect: 2.2 }));

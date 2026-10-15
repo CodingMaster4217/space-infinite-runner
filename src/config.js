@@ -38,8 +38,21 @@ export const WALLS = {
   edgeMargin: 1,
   /** a row never covers less than this many lanes each side of the ship */
   minHalfLanes: 5,
-  /** ...and never more: past this the extra geometry buys no gameplay */
-  maxHalfLanes: 14,
+  /**
+   * ...and never more: past this the extra geometry buys no gameplay, it is just
+   * more wall to read on the way in. Must stay at or above `wallReachLanes` for
+   * the worst case (the widest reachable band, at boost speed), or a barrier
+   * would be narrow enough to fly around — asserted in `scripts/test-logic.js`.
+   */
+  maxHalfLanes: 12,
+  /**
+   * Slab profile of one solid barrier segment, in world units. Kept modest on
+   * purpose: the barrier is already the full width of the play area, so a tall
+   * slab reads as a wall across the whole screen instead of a gate to thread.
+   * Sized just above the ship (hull half-height 0.52 at y = 0.75) so the gap stays
+   * legible at speed.
+   */
+  size: { height: 2.4, thickness: 1.5 },
   /** free gap width in lanes, eased from `start` (easy) to `end` (hard) */
   gap: { start: 3, end: 1.4 },
   /**
@@ -51,6 +64,13 @@ export const WALLS = {
   strip: { base: 26, perSpeed: 0.22, max: 74 },
   /** how strongly the reaction cushion grows with speed (fraction per ×base) */
   speedWarningGain: 0.55,
+  /**
+   * Ceiling on that stretch, in seconds. The warning *distance* still grows with
+   * speed; this caps how long the barrier hangs in the air, which in turn caps
+   * the band the ship could cross while it is in flight (and therefore the
+   * barrier's width — see `wallReachLanes`).
+   */
+  warningStretchCap: 2.2,
   /** warning indicator colours: light red → dark red → deepest red */
   colors: { light: 0xff8888, dark: 0x880000, deepest: 0x440000 },
   /** seconds of flash + squash when the barrier solidifies (the "pop") */
@@ -106,6 +126,7 @@ export const SPEED = {
 export const DIFFICULTY = {
   /** distance (metres) at which difficulty reaches 1.0 */
   fullAtDistance: 9000,
+  /** reaction window on the warning, eased from `start` (easy) to `end` (hard) */
   warning: { start: 1.8, end: 0.55 },
   /**
    * Clear track between the end of one barrier and the next one turning solid,
@@ -116,8 +137,13 @@ export const DIFFICULTY = {
    * cross any blocked lane, so the hole in the next barrier is only reachable if
    * this window is at least a lane transit long. `scripts/fairness.js` proves the
    * generated sequence stays inside it.
+   *
+   * Kept tight on purpose: it and `solidDurationAt` set the row cadence
+   * (`rowIntervalAt` = 2 × solid + this), so shrinking it is what makes barriers
+   * arrive more often. The floor is a one-lane transit (0.46 s) plus the
+   * verifier's slack, asserted in `scripts/test-logic.js`.
    */
-  rowBreathing: { start: 1.15, end: 0.72 },
+  rowBreathing: { start: 0.92, end: 0.56 },
   /** minimum distance between consecutive rows, in world units */
   minRowGap: 34,
   /** documented bound on how much of a lane window a single row may block */

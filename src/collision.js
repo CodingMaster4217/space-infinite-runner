@@ -30,12 +30,13 @@ export const playerBox = (x, y, z, shrink = 0.86) =>
   );
 
 /** A wall that occupies `laneCount` contiguous lanes starting at `laneIndex`. */
-export const wallBox = (laneIndex, laneSpan, z, thickness = 2.2) => {
+export const wallBox = (laneIndex, laneSpan, z, thickness = WALLS.size.thickness) => {
   const first = laneCenterX(laneIndex);
   const last = laneCenterX(laneIndex + laneSpan - 1);
   const cx = (first + last) / 2;
   const hx = (Math.abs(last - first) + LANES.width) / 2;
-  return makeBox(cx, 1.8, z, hx, 1.8, thickness / 2);
+  const halfHeight = WALLS.size.height / 2;
+  return makeBox(cx, halfHeight, z, hx, halfHeight, thickness / 2);
 };
 
 export const sphereOverlap = (ax, ay, az, ar, bx, by, bz, br) => {
@@ -81,7 +82,11 @@ export const warningDurationAt = (difficulty, speed = SPEED.base) => {
   const base = start - (start - end) * Math.pow(difficulty, 0.85);
   const speedFactor = clamp(speed / SPEED.base, 1, 3);
   const scaled = base * (1 + WALLS.speedWarningGain * (speedFactor - 1));
-  return clamp(scaled, end, start * 1.5);
+  // The stretch is capped (rather than left to grow with the difficulty curve's
+  // `start`): the warning *distance* keeps growing with speed either way, and the
+  // cap is what keeps the reachable band — and so the barrier's width — bounded
+  // at boost speed. See `WALLS.warningStretchCap` and `wallReachLanes`.
+  return clamp(scaled, end, WALLS.warningStretchCap);
 };
 
 /** Warning distance actually realised at this difficulty + speed, in world units. */
@@ -104,6 +109,21 @@ export const gapLanesAt = (difficulty = 0) => {
 };
 
 /**
+ * The band the ship could physically cross while a row is in flight, in lanes
+ * each side of the lane it holds when the row arrives, plus one lane of cushion.
+ *
+ * This is the *hard* lower bound on how wide a barrier has to be: anything
+ * narrower can be outflown sideways, which is exactly the perimeter exploit
+ * full-width rows exist to close. Kept separate from `wallHalfLanes` (which may
+ * enlarge the window for looks) so the bound can be asserted against
+ * `WALLS.maxHalfLanes` instead of being silently clamped below what it must be.
+ */
+export const wallReachLanes = ({ warnDuration, solidDuration } = {}) => {
+  const flight = Math.max(0.2, (warnDuration ?? 1.2) + (solidDuration ?? 0.9));
+  return Math.ceil((SHIP.maxLateralSpeed * flight) / LANES.width) + WALLS.edgeMargin;
+};
+
+/**
  * How many lanes each side of the ship a wall row must cover.
  *
  * Two constraints are reconciled:
@@ -111,6 +131,10 @@ export const gapLanesAt = (difficulty = 0) => {
  *     is in flight, so a narrower barrier could simply be outrun sideways;
  *   - *sight*: the barrier should read as filling the play area, so it also covers
  *     half of what the frustum shows at the warning distance.
+ *
+ * The window is deliberately kept to the smallest span that still satisfies both:
+ * a barrier only stays on screen for as long as it sweeps past the ship, so every
+ * lane of extra geometry is screen clutter the player has to read on the way in.
  */
 export const wallHalfLanes = ({
   speed,
@@ -120,7 +144,7 @@ export const wallHalfLanes = ({
   fov = 72,
 } = {}) => {
   const flight = Math.max(0.2, (warnDuration ?? 1.2) + (solidDuration ?? 0.9));
-  const reachLanes = Math.ceil((SHIP.maxLateralSpeed * flight) / LANES.width) + WALLS.edgeMargin;
+  const reachLanes = wallReachLanes({ warnDuration, solidDuration });
   const depth = Math.max(30, (speed ?? SPEED.base) * flight * 0.5);
   const halfWidth = depth * Math.tan((fov * Math.PI) / 360) * aspect;
   const visibleLanes = Math.ceil((halfWidth / LANES.width) * 0.5) + WALLS.edgeMargin;
@@ -354,8 +378,15 @@ export function pickWallRow(
 /** Guarantees at least one lane of breathing room for the ship. */
 export const laneIsFlyableByShip = () => LANES.width > SHIP.halfExtents.x * 2.4;
 
-/** Seconds a wall stays solid as it sweeps past the ship. */
-export const solidDurationAt = (difficulty) => 1.05 - 0.35 * clamp(difficulty, 0, 1);
+/**
+ * Seconds a wall stays solid as it sweeps past the ship.
+ *
+ * Shorter than it used to be: the sweep time is what makes a barrier feel like a
+ * slab rather than a gate, and it also sets the barrier's lateral footprint (see
+ * `wallReachLanes`). Trimming it shrinks the wall *and* tightens the row cadence,
+ * because the interval between rows is derived from it.
+ */
+export const solidDurationAt = (difficulty) => 0.8 - 0.26 * clamp(difficulty, 0, 1);
 
 /** Convert world speed to a display speed (km/h) for the HUD. */
 export const toDisplaySpeed = (worldSpeed) => worldSpeed * 21;

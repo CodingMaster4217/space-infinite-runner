@@ -15,8 +15,9 @@ import { COLORS, CORRIDOR, DIFFICULTY, LANES, WALLS, laneCenterX } from './confi
 import { warningColorAt } from './collision.js';
 import { clamp } from './utils.js';
 
-const WALL_HEIGHT = 3.6;
-const WALL_THICKNESS = 2.2;
+/** Slab profile — one source of truth for the mesh and the collision sweep. */
+const WALL_HEIGHT = WALLS.size.height;
+const WALL_THICKNESS = WALLS.size.thickness;
 const STRIP_LENGTH = 30;
 const STRIP_OFFSET = 1.2; // strip starts just in front of the wall faces
 /** A barrier is at most two slabs: everything left of the gap, and right of it. */

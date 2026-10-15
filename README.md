@@ -49,9 +49,12 @@ axis and the index simply keeps counting (…, −8, −7) as you fly out.
 
 **Full-width barriers + warning system** — every row is a barrier that covers the
 entire play area around the ship: the band it could physically reach while the row
-is in flight, plus everything visible beside it (7–14 lanes each side, 106–134 world
-units of wall per row). It leaves exactly **one free gap**, and each row runs
-through two phases:
+is in flight, plus everything visible beside it (up to 12 lanes each side, 96–115
+world units of wall per row). The window is deliberately *not* made any wider than
+that bound — a barrier only exists while it sweeps past the ship, so every extra
+lane of it is clutter to read on the way in — and the slab itself is sized just
+above the hull (2.4 × 1.5 world units) rather than into a full-screen wall. It
+leaves exactly **one free gap**, and each row runs through two phases:
 
 1. `warn` — a translucent lattice marks the lanes the barrier will occupy: a floor
    strip with travelling chevrons, edge lasers and a vertical warning grid, drawn
@@ -82,10 +85,12 @@ layer (depths off, additive) so the barrier warnings and power-ups always read i
 front of it.
 
 **Difficulty scaling** — base speed ramps over time, the warning window shortens
-(1.80 s → 0.55 s at cruise speed, stretched back out proportionally as the run gets
-faster), the free gap narrows (3 → 1 lanes), the barrier widens (9 → 14 lanes each
-side) and the clear track between barriers tightens (1.15 s → 0.72 s of lane-change
-window), with reachability constraints applied to every row as distance grows. The
+(1.80 s → 0.55 s at cruise speed, stretched back out with speed to a 2.20 s
+ceiling), the free gap narrows (3 → 1 lanes), the barrier widens (8 → 12 lanes each
+side) and the clear track between barriers tightens (0.92 s → 0.56 s of lane-change
+window) — which is also what sets the row cadence, so barriers arrive roughly every
+2.6 s early in a run and every 1.7 s at full difficulty. Every row carries
+reachability constraints as distance grows. The
 hole also walks further off the ship's lane less often late in a run: the lane-change
 window is only a lane transit plus the guard margin wide, so the fairness model
 rejects the long slides and retries them as one-lane threads.
@@ -126,7 +131,7 @@ vendor/three.module.js   Three.js r186 (vendored)
 
 ```bash
 npm run check            # parse every ES module (node --check)
-npm test                 # 78 pure-logic checks: difficulty, barriers, ramp, collisions, fairness
+npm test                 # 79 pure-logic checks: difficulty, barriers, ramp, collisions, fairness
 node scripts/fairness.js # proves the spawner never emits an undodgeable barrier sequence
 node scripts/simulate.js # balance benchmark + perimeter probes (hold a direction / never steer)
 node scripts/e2e.js      # 136 browser checks (Playwright, real page over HTTP)
@@ -148,20 +153,28 @@ dodgeable continuation exists. Each row is anchored to the lane the ship is
 predicted to hold, so the danger follows the player across the endless plane instead
 of sitting in a fixed corridor.
 
+The barrier's *minimum* width is the band the ship could cross while the row is in
+flight (`wallReachLanes`), and `scripts/test-logic.js` asserts across the whole
+speed and difficulty range that this never exceeds `WALLS.maxHalfLanes` — otherwise
+the clamp in `wallHalfLanes` would silently ship barriers narrow enough to fly
+*around*, which is the one thing full-width rows must never allow.
+
 A full-width barrier changes what "dodgeable" means: while a row is sweeping past,
 the ship cannot cross any blocked lane, so the only place it can change lanes is the
 clear track *between* two barriers. Row cadence is therefore derived rather than
 tuned by feel — `2 × solidDuration + rowBreathing`, where the breathing window
-(1.15 s → 0.72 s) is guaranteed to be longer than a one-lane transit (0.46 s) — and
+(0.92 s → 0.56 s) is guaranteed to be longer than a one-lane transit (0.46 s) — and
 the jitter only ever adds time. Without that window every hole would have to sit on
 the lane the ship already occupies, and holding a direction would be a winning
-strategy. `scripts/fairness.js` replays the real spawner for 600 s of flight (262
-rows up to difficulty 1.0, 0 relaxed rows, 1.00 spawn attempts per row) and confirms a
-valid dodge path for every one — while 97.3 % of those rows block the lane the ship is
-anchored on, because the hole is placed off it by construction. `scripts/simulate.js`
-runs the complementary probes and requires that a pilot who holds one direction for
-ever *and* a pilot who never steers at all both die, in every run (median survival
-195 m either way, against ≈10 km for the greedy pilot).
+strategy. `scripts/fairness.js` replays the real spawner for 600 s of flight (338
+rows up to difficulty 1.0, 1 relaxed row — still verified feasible, 1.05 spawn
+attempts per row) and confirms a valid dodge path for every one — while 97.9 % of
+those rows block the lane the ship is anchored on, because the hole is placed off it
+by construction. `scripts/simulate.js` runs the complementary probes and requires
+that a pilot who holds one direction for ever *and* a pilot who never steers at all
+both die, in every run (median survival 184 m either way, against ≈8.9 km for the
+greedy pilot — the tighter cadence makes the skilled game slightly harder than it
+was).
 
 ## Performance notes
 
@@ -189,7 +202,7 @@ ray fan plus a glow disc locked to the vanishing point. On a fill-bound device t
 nebula is the first thing to cut, then the horizon ray fan.
 
 Because the spawner now demands a lane change on every row, a pilot that never
-touches the controls dies in ~4 s (195 m). The cadence check in `scripts/e2e.js`
+touches the controls dies in ~4 s (184 m). The cadence check in `scripts/e2e.js`
 therefore keeps the ship shielded while it samples the arrival rhythm, rather than
 relying on straight flight to survive the measurement.
 
