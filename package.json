@@ -1,0 +1,27 @@
+{
+  "name": "hyperdrive-space-runner",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HYPERDRIVE — a standalone 3D space infinite runner built with Three.js, vanilla JS, HTML and CSS.",
+  "scripts": {
+    "start": "node scripts/dev-server.js",
+    "serve": "node scripts/dev-server.js",
+    "check": "node scripts/check-syntax.js",
+    "test": "node scripts/test-logic.js",
+    "fairness": "node scripts/fairness.js",
+    "balance": "node scripts/simulate.js",
+    "e2e": "node scripts/e2e.js",
+    "perf": "node scripts/perf-probe.js"
+  },
+  "keywords": [
+    "threejs",
+    "webgl",
+    "game",
+    "infinite-runner"
+  ],
+  "license": "MIT",
+  "devDependencies": {
+    "playwright": "^1.64.1"
+  }
+}

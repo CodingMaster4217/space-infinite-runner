@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#04060f" />
+  <meta name="description" content="HYPERDRIVE - a 3D space infinite runner built with Three.js, vanilla JavaScript, HTML and CSS." />
+  <title>HYPERDRIVE :: Space Infinite Runner</title>
+  <link rel="stylesheet" href="styles/main.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three.module.js"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <!-- ===================== 3D VIEWPORT ===================== -->
+    <canvas id="game-canvas" tabindex="-1" aria-label="Space infinite runner playfield"></canvas>
+
+    <!-- ===================== HUD ===================== -->
+    <div id="hud" class="hud is-hidden" aria-live="off">
+      <header class="hud__top">
+        <div class="hud-card hud-card--score">
+          <span class="hud-card__label">Distance</span>
+          <div class="hud-card__value-row">
+            <span class="hud-card__value" id="hud-score">0</span>
+            <span class="hud-card__unit">m</span>
+          </div>
+          <div class="hud-card__sub" id="hud-best">Best 0 m</div>
+        </div>
+
+        <div class="hud-card hud-card--speed">
+          <span class="hud-card__label">Velocity</span>
+          <div class="hud-card__value-row">
+            <span class="hud-card__value" id="hud-speed">0</span>
+            <span class="hud-card__unit" id="hud-speed-unit">km/h</span>
+          </div>
+          <div class="speed-bar" aria-hidden="true">
+            <div class="speed-bar__fill" id="hud-speed-fill"></div>
+            <div class="speed-bar__ticks"></div>
+          </div>
+        </div>
+
+        <div class="hud-card hud-card--status">
+          <div class="hud-card__row">
+            <span class="hud-card__label">Power-ups</span>
+            <span class="hud-chip hud-chip--ghost" id="hud-fps-chip">60 FPS</span>
+          </div>
+          <div class="powerup-tray" id="hud-powerups">
+            <span class="powerup-tray__empty" id="hud-powerups-empty">none active</span>
+          </div>
+        </div>
+      </header>
+
+      <div class="hud__center" id="hud-alert" role="status"></div>
+
+      <div class="hud__toasts" id="hud-toasts"></div>
+
+      <footer class="hud__bottom">
+        <div class="touch-pad" id="touch-pad">
+          <button class="ctrl-btn ctrl-btn--steer" id="btn-left" type="button" aria-label="Steer left">
+            <span class="ctrl-btn__glyph">◀</span><span class="ctrl-btn__hint">A / ←</span>
+          </button>
+          <button class="ctrl-btn ctrl-btn--steer" id="btn-right" type="button" aria-label="Steer right">
+            <span class="ctrl-btn__glyph">▶</span><span class="ctrl-btn__hint">D / →</span>
+          </button>
+        </div>
+        <div class="touch-pad touch-pad--right">
+          <button class="ctrl-btn ctrl-btn--mini" id="btn-mute" type="button" aria-label="Toggle audio">🔊</button>
+          <button class="ctrl-btn ctrl-btn--mini" id="btn-pause" type="button" aria-label="Pause game">❚❚</button>
+        </div>
+      </footer>
+    </div>
+
+    <!-- damage / boost full-screen feedback -->
+    <div class="fx-layer" aria-hidden="true">
+      <div class="fx-vignette" id="fx-damage"></div>
+      <div class="fx-boost" id="fx-boost"></div>
+      <div class="fx-scanlines"></div>
+      <div class="fx-glitch" id="fx-glitch"></div>
+    </div>
+
+    <!-- ===================== MODALS ===================== -->
+    <div class="modal-layer" id="modal-layer">
+      <!-- START -->
+      <section class="modal is-active" id="modal-start" role="dialog" aria-modal="true" aria-labelledby="start-title">
+        <div class="modal__panel modal__panel--start">
+          <div class="modal__corner modal__corner--tl"></div>
+          <div class="modal__corner modal__corner--tr"></div>
+          <div class="modal__corner modal__corner--bl"></div>
+          <div class="modal__corner modal__corner--br"></div>
+
+          <p class="modal__eyebrow">Sector&nbsp;7 // Infinite Run Protocol</p>
+          <h1 class="modal__title" id="start-title">HYPER<span>DRIVE</span></h1>
+          <p class="modal__tagline">Thread the collapsing corridors of the Kessel Rift. Walls telegraph before they materialise &mdash; read the red lattice and dodge.</p>
+
+          <div class="legend">
+            <article class="legend__item legend__item--boost">
+              <span class="legend__orb"></span>
+              <h3>Speed Boost</h3>
+              <p>Warp burst, cinematic star streaks and temporary invincibility. Plough through walls for bonus distance.</p>
+            </article>
+            <article class="legend__item legend__item--brake">
+              <span class="legend__orb"></span>
+              <h3>Warp Brake</h3>
+              <p>Time dilation. Obstacles crawl while your ship keeps full agility &mdash; thread tight gaps with ease.</p>
+            </article>
+            <article class="legend__item legend__item--shield">
+              <span class="legend__orb"></span>
+              <h3>Shield Core</h3>
+              <p>Absorbs exactly one wall impact. The core shatters, you keep flying.</p>
+            </article>
+          </div>
+
+          <div class="controls-grid">
+            <div class="controls-grid__col">
+              <h4>Keyboard</h4>
+              <ul>
+                <li><kbd>←</kbd><kbd>→</kbd> / <kbd>A</kbd><kbd>D</kbd><span>steer</span></li>
+                <li><kbd>P</kbd> / <kbd>Esc</kbd><span>pause</span></li>
+                <li><kbd>R</kbd><span>restart</span></li>
+                <li><kbd>Enter</kbd><span>launch</span></li>
+              </ul>
+            </div>
+            <div class="controls-grid__col">
+              <h4>Touch</h4>
+              <ul>
+                <li><span class="controls-grid__gesture">Drag</span><span>steer ship</span></li>
+                <li><span class="controls-grid__gesture">Hold ◀ ▶</span><span>steer ship</span></li>
+                <li><span class="controls-grid__gesture">❚❚</span><span>pause</span></li>
+              </ul>
+            </div>
+          </div>
+
+          <div class="modal__actions">
+            <button class="btn btn--primary" id="btn-start" type="button">
+              <span class="btn__label">Launch Run</span>
+            </button>
+            <p class="modal__fineprint">No hard lane limits &mdash; steer freely. Difficulty ramps with distance.</p>
+          </div>
+          <p class="modal__best" id="start-best">Best distance: 0 m</p>
+        </div>
+      </section>
+
+      <!-- PAUSE -->
+      <section class="modal" id="modal-pause" role="dialog" aria-modal="true" aria-labelledby="pause-title">
+        <div class="modal__panel modal__panel--compact">
+          <p class="modal__eyebrow">System Halt</p>
+          <h2 class="modal__title modal__title--sm" id="pause-title">PAUSED</h2>
+          <div class="stat-strip" id="pause-stats"></div>
+          <div class="modal__actions">
+            <button class="btn btn--primary" id="btn-resume" type="button"><span class="btn__label">Resume</span></button>
+            <button class="btn btn--ghost" id="btn-pause-restart" type="button"><span class="btn__label">Restart Run</span></button>
+            <button class="btn btn--ghost" id="btn-pause-menu" type="button"><span class="btn__label">Abort to Menu</span></button>
+          </div>
+        </div>
+      </section>
+
+      <!-- GAME OVER -->
+      <section class="modal" id="modal-over" role="dialog" aria-modal="true" aria-labelledby="over-title">
+        <div class="modal__panel modal__panel--over">
+          <p class="modal__eyebrow modal__eyebrow--danger">Hull Breach Detected</p>
+          <h2 class="modal__title modal__title--sm" id="over-title">RUN TERMINATED</h2>
+
+          <div class="final-score">
+            <span class="final-score__label">Final Distance</span>
+            <span class="final-score__value" id="over-score">0</span>
+            <span class="final-score__unit">metres</span>
+          </div>
+
+          <div class="stat-grid" id="over-stats"></div>
+
+          <div class="modal__actions modal__actions--row">
+            <button class="btn btn--primary" id="btn-restart" type="button"><span class="btn__label">Restart Instantly</span></button>
+            <button class="btn btn--ghost" id="btn-menu" type="button"><span class="btn__label">Main Menu</span></button>
+          </div>
+          <p class="modal__fineprint">R to restart &middot; Esc for menu</p>
+        </div>
+      </section>
+    </div>
+
+    <!-- boot overlay -->
+    <div class="boot" id="boot">
+      <div class="boot__ring"></div>
+      <p class="boot__text">Initialising hyperdrive core…</p>
+    </div>
+
+    <!-- fatal error surface -->
+    <div class="fatal is-hidden" id="fatal">
+      <h2>WebGL unavailable</h2>
+      <p id="fatal-msg"></p>
+    </div>
+  </div>
+
+  <script type="module" src="src/main.js"></script>
+</body>
+</html>
