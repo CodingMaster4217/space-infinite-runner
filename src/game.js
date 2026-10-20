@@ -1283,6 +1283,5 @@ export class Game {
         f.visible = true;
       });
     }
-    wall.edgeMaterial.opacity = 0.75;
   }
 }

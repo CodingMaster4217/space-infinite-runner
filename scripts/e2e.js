@@ -200,7 +200,20 @@ async function main() {
     rowsPerSecond > 0.3 && rowsPerSecond < 1.6,
     `${rowsPerSecond.toFixed(2)} rows/s (${cadenceRows} in ${cadenceSeconds.toFixed(1)}s)`);
   // The live spawner draws its spacing per row: the distance consumed between
-  // arrivals is the proof that the cadence is not a fixed interval.
+  // arrivals is the proof that the cadence is not a fixed interval. A restart
+  // clears the draw history, and the cadence pass above can die before it has
+  // banked four draws, so top the sample up here: short steps (so two rows never
+  // land inside one step) with the shield renewed every step.
+  for (let i = 0; i < 200; i += 1) {
+    if ((await debugCall(page, 'spawnDistances')).length >= 4) break;
+    const before = await snap(page);
+    if (before.state !== 'playing') {
+      if ((await recover(page)) !== 'playing') break;
+      await debugCall(page, 'setSpawning', true);
+    }
+    if (before.shieldCharges === 0 && before.invuln <= 0) await debugCall(page, 'setShield');
+    await advance(page, 0.2);
+  }
   const spacing = await debugCall(page, 'spawnDistances');
   const spacingSpread = spacing.length ? Math.max(...spacing) / Math.min(...spacing) : 0;
   check('row spacing is drawn per row, not run on a fixed interval',
@@ -304,8 +317,12 @@ async function main() {
   check('phase starts alive before the barrier phase', (await recover(page)) === 'playing');
   await debugCall(page, 'setSpawning', false);
 
+  // The spawner's draws are not seeded, so the tile/near-miss assertions are a
+  // sample of its distribution: 60 rows keep that sample stable enough that a
+  // rare unlucky streak cannot fail a working spawner (24 rows could).
+  const SAMPLES = 60;
   const spawned = [];
-  for (let i = 0; i < 24; i += 1) {
+  for (let i = 0; i < SAMPLES; i += 1) {
     await debugCall(page, 'clearField');
     await debugCall(page, 'setShipX', i % 2 === 0 ? 0 : 26 + i * 7);
     await advance(page, 0.12);
@@ -333,7 +350,7 @@ async function main() {
   const widest = spawned.reduce((best, r) => (r.laneSpan > best.laneSpan ? r : best), spawned[0]);
 
   check('every row is built from at most five wall tiles side by side',
-    spawned.length === 24 && tileCap === 5 && oversize.length === 0,
+    spawned.length === SAMPLES && tileCap === 5 && oversize.length === 0,
     `${oversize.length} oversize rows, widest ${widest.laneSpan} of ${tileCap}`);
   check('the tiles stand in one contiguous run, never scattered',
     contiguous.length === spawned.length,
@@ -345,7 +362,7 @@ async function main() {
     boxPerTile.length === spawned.length,
     `${boxPerTile.length}/${spawned.length} rows boxed per tile`);
   check('the spawner regularly drops a cluster on the ship\'s lane',
-    blockedShipLane >= 12,
+    blockedShipLane >= SAMPLES / 2,
     `${blockedShipLane}/${spawned.length} rows block the anchor lane`);
   check('near-miss rows slide past the ship instead of blocking it',
     nearMiss.length > 0 && nearestMiss >= Math.ceil(nearMiss.length / 2),

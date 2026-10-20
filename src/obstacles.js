@@ -117,7 +117,6 @@ export class ObstacleManager {
     this.warningProgress = 0;
 
     this._slabGeo = new THREE.BoxGeometry(1, WALL_HEIGHT, WALL_THICKNESS);
-    this._edgeGeo = new THREE.EdgesGeometry(this._slabGeo);
     this._faceGeo = new THREE.PlaneGeometry(1, WALL_HEIGHT);
     this._stripGeo = new THREE.PlaneGeometry(1, STRIP_LENGTH);
     this._curtainGeo = new THREE.PlaneGeometry(1, WALL_HEIGHT + 1);
@@ -146,13 +145,6 @@ export class ObstacleManager {
       transparent: true,
       opacity: 0.96,
     });
-    const edgeMaterial = new THREE.LineBasicMaterial({
-      color: COLORS.magenta,
-      transparent: true,
-      opacity: 0.35,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-    });
     const hazardMaterial = this._hazardMaterial();
 
     const wall = {
@@ -175,7 +167,6 @@ export class ObstacleManager {
       ttImpact: 0,
       alarmRepeat: 0,
       slabMaterial,
-      edgeMaterial,
       hazardMaterial,
     };
 
@@ -198,10 +189,6 @@ export class ObstacleManager {
     slab.position.y = WALL_HEIGHT / 2;
     group.add(slab);
 
-    const edges = new THREE.LineSegments(this._edgeGeo, wall.edgeMaterial);
-    edges.position.y = WALL_HEIGHT / 2;
-    group.add(edges);
-
     const faceFront = new THREE.Mesh(this._faceGeo, wall.hazardMaterial);
     faceFront.position.set(0, WALL_HEIGHT / 2, WALL_THICKNESS / 2 + 0.03);
     group.add(faceFront);
@@ -214,7 +201,6 @@ export class ObstacleManager {
     return {
       group,
       slab,
-      edges,
       faces: [faceFront, faceBack],
       lane: 0,
       width: LANES.width,
@@ -323,7 +309,6 @@ export class ObstacleManager {
       tile.width = tileWidth;
       tile.group.position.x = laneCenterX(start + i);
       tile.slab.scale.set(tileWidth, 1, 1);
-      tile.edges.scale.set(tileWidth, 1, 1);
       tile.faces.forEach((f) => {
         f.scale.x = tileWidth;
       });
@@ -387,12 +372,10 @@ export class ObstacleManager {
     for (const tile of wall.tiles) {
       tile.slab.visible = false;
       tile.slab.scale.z = 1;
-      tile.edges.scale.z = 1;
       tile.faces.forEach((f) => {
         f.visible = false;
       });
     }
-    wall.edgeMaterial.opacity = 0.3;
 
     this.walls.push(wall);
     this.onWarning(wall, { difficulty, row });
@@ -444,8 +427,6 @@ export class ObstacleManager {
           l.scale.y = 1 + Math.sin(this.time * (9 + p * 12)) * 0.04;
         });
 
-        wall.edgeMaterial.color.setRGB(rgb.r, rgb.g, rgb.b);
-        wall.edgeMaterial.opacity = 0.22 + p * 0.24;
         for (const tile of wall.tiles) {
           if (!tile.active) continue;
           tile.slab.visible = false;
@@ -467,13 +448,10 @@ export class ObstacleManager {
         wall.hazardMaterial.uniforms.uTime.value = this.time;
         for (const tile of wall.tiles) {
           if (!tile.active) continue;
-          // brief swell on impact: the cluster visually "pops" solid, its edges
-          // flashing white-hot before cooling back to the neon outline
+          // brief swell on impact: the cluster visually "pops" solid and then
+          // settles back to its resting depth
           tile.slab.scale.z = 1 + pop * 0.55;
-          tile.edges.scale.z = 1 + pop * 0.55;
         }
-        wall.edgeMaterial.color.setRGB(1, 0.247 + 0.753 * pop, 0.82 + 0.18 * pop);
-        wall.edgeMaterial.opacity = 0.75 + 0.2 * pop;
 
         if (z > CORRIDOR.despawnZ) {
           this._release(wall);
@@ -491,8 +469,6 @@ export class ObstacleManager {
     wall.phase = 'solid';
     wall.popT = WALLS.pop;
     wall.warn.group.visible = false;
-    wall.edgeMaterial.color.setRGB(1, 1, 1);
-    wall.edgeMaterial.opacity = 0.95;
 
     const z = wall.group.position.z;
     for (const tile of wall.tiles) {
@@ -500,7 +476,6 @@ export class ObstacleManager {
       tile.slab.visible = true;
       // start the pop on the very frame the tile lands
       tile.slab.scale.z = 1.55;
-      tile.edges.scale.z = 1.55;
       tile.faces.forEach((f) => {
         f.visible = true;
       });

@@ -61,8 +61,8 @@ one runs through two phases:
    down. The warning's *length* and *lookahead distance* both scale with speed (a
    longer floor strip and a cluster that spawns further down the track the faster
    you fly), which keeps reaction distance growing even as the window shrinks.
-2. `solid` — the tiles materialise with a bright **pop** (white-hot edges, a flash
-   burst per tile and one shockwave per row) and collide until they sweep past.
+2. `solid` — the tiles materialise with a bright **pop** (a flash burst per tile
+   and one shockwave per row) and collide until they sweep past.
 
 Because the cluster is local, the dodge is lateral: fly around it, not through a
 hole in a wall. Most rows stand on the lane the ship is heading for (82 %, biased
