@@ -171,19 +171,23 @@ async function main() {
   check('renderer stays alive under load', early.renderer.drawCalls > 10, `calls=${early.renderer.drawCalls}`);
   await shoot(page, '02-gameplay.png');
 
-  // Barriers are full-width and carry a lane-change window, so the cadence is
-  // measured rather than assumed. Flying straight is now punished by the very
-  // first barrier, so the pilot is kept alive with a shield (topped up whenever
-  // the last one has been spent): arrivals are still counted from the engine's
-  // own warning counter, so the pilot's survival never distorts the measurement.
+  // Clusters carry a warning window, so the cadence is measured rather than
+  // assumed. Flying straight is now punished by the very first row, so the pilot
+  // is kept alive with a shield (topped up whenever the last one has been spent):
+  // arrivals are still counted from the engine's own warning counter, so the
+  // pilot's survival never distorts the measurement.
   let cadenceRows = 0;
   let cadenceSeconds = 0;
-  for (let i = 0; i < 24; i += 1) {
-    const before = await snap(page);
+  for (let i = 0; i < 40; i += 1) {
+    if (cadenceRows >= 6) break;
+    let before = await snap(page);
     if (before.state !== 'playing') {
       // a death restarts the run: its dead time is skipped, not counted
       if ((await recover(page)) !== 'playing') break;
-      continue;
+      // recover() stops the spawner so a phase can own the field; the cadence
+      // measurement needs the real spawner running
+      await debugCall(page, 'setSpawning', true);
+      before = await snap(page);
     }
     if (before.shieldCharges === 0 && before.invuln <= 0) await debugCall(page, 'setShield');
     await advance(page, 0.5);
@@ -192,9 +196,19 @@ async function main() {
     cadenceSeconds += 0.5;
   }
   const rowsPerSecond = cadenceRows / Math.max(0.5, cadenceSeconds);
-  check('barriers keep arriving at a human-readable rhythm (0.25–1.2 per second)',
-    rowsPerSecond > 0.25 && rowsPerSecond < 1.2,
-    `${rowsPerSecond.toFixed(2)} barriers/s (${cadenceRows} in ${cadenceSeconds.toFixed(1)}s)`);
+  check('clusters keep arriving at a human-readable rhythm (0.3–1.6 per second)',
+    rowsPerSecond > 0.3 && rowsPerSecond < 1.6,
+    `${rowsPerSecond.toFixed(2)} rows/s (${cadenceRows} in ${cadenceSeconds.toFixed(1)}s)`);
+  // The live spawner draws its spacing per row: the distance consumed between
+  // arrivals is the proof that the cadence is not a fixed interval.
+  const spacing = await debugCall(page, 'spawnDistances');
+  const spacingSpread = spacing.length ? Math.max(...spacing) / Math.min(...spacing) : 0;
+  check('row spacing is drawn per row, not run on a fixed interval',
+    spacing.length >= 4 && new Set(spacing).size >= 3 && spacingSpread > 1.3,
+    spacing.length
+      ? `${spacing.length} draws, ${Math.min(...spacing)}–${Math.max(...spacing)} world units ` +
+        `(${spacingSpread.toFixed(2)}× spread)`
+      : 'no spacing samples recorded');
   const afterCadence = await snap(page);
   process.stdout.write(
     `  note: shielded straight flight survived ${cadenceSeconds.toFixed(1)}s of barriers ` +
@@ -286,7 +300,7 @@ async function main() {
     cleared && dodged.state === 'playing' && dodged.shipX > 8.5,
     `cleared=${cleared} state=${dodged.state} x=${dodged.shipX} (wall edge 7.2 + hull 0.82)`);
 
-  /* ================= full-width barriers (phase 4) ================= */
+  /* ================= wall clusters (phase 5) ================= */
   check('phase starts alive before the barrier phase', (await recover(page)) === 'playing');
   await debugCall(page, 'setSpawning', false);
 
@@ -298,46 +312,49 @@ async function main() {
     const row = await debugCall(page, 'spawnProceduralRow');
     if (row) spawned.push(row);
   }
-  const windowed = spawned.filter((r) => r.laneCount === r.halfLanes * 2 + 1);
-  const fullCoverage = spawned.filter((r) => r.blockedLanes.length + r.gapLanes.length === r.laneCount);
-  const reachesLeft = spawned.filter((r) => Math.min(...r.blockedLanes) <= r.anchorLane - r.halfLanes);
-  const reachesRight = spawned.filter((r) => Math.max(...r.blockedLanes) >= r.anchorLane + r.halfLanes);
-  const gapInside = spawned.filter((r) =>
-    r.gapLanes.every((l) => l >= r.anchorLane - r.halfLanes && l <= r.anchorLane + r.halfLanes));
-  const twoSlab = spawned.filter((r) => r.segments.length === 2).length;
-  const blockedShipLane = spawned.filter((r) => !r.gapLanes.includes(r.anchorLane)).length;
-  const moves = spawned.map((r) => Math.min(...r.gapLanes.map((l) => Math.abs(l - r.anchorLane))));
-  const meanMove = moves.reduce((a, b) => a + b, 0) / moves.length;
-  const interiorGaps = spawned.filter((r) =>
-    r.gapLanes[0] > r.anchorLane - r.halfLanes &&
-    r.gapLanes[r.gapLanes.length - 1] < r.anchorLane + r.halfLanes);
-  const boxesLeaveGap = spawned.every((r) =>
-    r.boxes.every((b) => !r.gapLanes.some((l) => l >= b.laneStart && l < b.laneStart + b.laneSpan)));
+  const tileCap = spawned[0].maxTiles;
+  const oversize = spawned.filter((r) => r.laneSpan > tileCap || r.blockedLanes.length > tileCap);
+  const contiguous = spawned.filter((r) =>
+    r.segments.length === 1 &&
+    r.segments[0].span === r.laneSpan &&
+    r.blockedLanes.every((lane, i) => lane === r.blockedLanes[0] + i));
+  const wide = spawned.filter((r) => r.width > tileCap * 4.8);
+  const boxPerTile = spawned.filter(
+    (r) => r.boxes.length === r.laneSpan && r.boxes.every((b) => b.laneSpan === 1));
+  const blockedShipLane = spawned.filter((r) => r.blockedLanes.includes(r.anchorLane)).length;
+  const nearMiss = spawned.filter((r) => !r.blockedLanes.includes(r.anchorLane));
+  const nearestMiss = nearMiss.filter(
+    (r) => r.laneStart === r.anchorLane + 1 || r.laneStart + r.laneSpan - 1 === r.anchorLane - 1
+  ).length;
   const farFromAxis = spawned.filter((r) => Math.abs(r.anchorLane) > 5);
-  const keyEye = spawned.reduce((best, r) => (r.halfLanes > best.halfLanes ? r : best), spawned[0]);
+  const trailsShip = farFromAxis.filter((r) =>
+    r.blockedLanes.every((lane) => Math.abs(lane - r.anchorLane) <= tileCap));
+  const widths = new Set(spawned.map((r) => r.laneSpan));
+  const widest = spawned.reduce((best, r) => (r.laneSpan > best.laneSpan ? r : best), spawned[0]);
 
-  check('every barrier is generated in a window centred on the ship',
-    spawned.length === 24 && windowed.length === 24,
-    `${windowed.length}/${spawned.length} rows, e.g. ${keyEye.halfLanes * 2 + 1} lanes wide`);
-  check('the barrier covers its whole window apart from the gap',
-    fullCoverage.length === spawned.length,
-    `${keyEye.blockedLanes.length} blocked + ${keyEye.gapLanes.length} gap lanes`);
-  check('the barrier reaches past both edges of the ship\'s band',
-    reachesLeft.length === spawned.length && reachesRight.length === spawned.length,
-    `e.g. anchor lane ${keyEye.anchorLane} covered ${Math.min(...keyEye.blockedLanes)}..${Math.max(...keyEye.blockedLanes)}`);
-  check('the gap is always inside the play area', gapInside.length === spawned.length);
-  check('barriers with a hole in the middle are produced', twoSlab > 0, `${twoSlab} of ${spawned.length} two-slab rows`);
-  check('no gap sits flush with an edge of the play area',
-    interiorGaps.length === spawned.length,
-    `${interiorGaps.length}/${spawned.length} gaps have wall on both sides`);
-  check('the spawner regularly demands a lane change',
-    meanMove > 0.8 && Math.max(...moves) >= 2 && blockedShipLane >= 1,
-    `mean move ${meanMove.toFixed(2)} lanes (max ${Math.max(...moves)}), ` +
-      `${blockedShipLane}/${spawned.length} rows block the ship's own lane`);
-  check('the collision slabs leave the gap physically open', boxesLeaveGap);
-  check('full-width barriers follow the ship off the world axis',
-    farFromAxis.length >= 8 && farFromAxis.every((r) => r.gapLanes.every((l) => l >= r.anchorLane - r.halfLanes)),
-    `${farFromAxis.length} rows spawned past lane 5`);
+  check('every row is built from at most five wall tiles side by side',
+    spawned.length === 24 && tileCap === 5 && oversize.length === 0,
+    `${oversize.length} oversize rows, widest ${widest.laneSpan} of ${tileCap}`);
+  check('the tiles stand in one contiguous run, never scattered',
+    contiguous.length === spawned.length,
+    `${contiguous.length}/${spawned.length} contiguous`);
+  check('a row is only a few lanes wide (~24 world units at most)',
+    wide.length === 0 && widest.width <= tileCap * 4.8,
+    `widest ${widest.width.toFixed(1)} world units (${widest.laneSpan} lanes)`);
+  check('collision boxes are one per tile, so the space beside a row is open',
+    boxPerTile.length === spawned.length,
+    `${boxPerTile.length}/${spawned.length} rows boxed per tile`);
+  check('the spawner regularly drops a cluster on the ship\'s lane',
+    blockedShipLane >= 12,
+    `${blockedShipLane}/${spawned.length} rows block the anchor lane`);
+  check('near-miss rows slide past the ship instead of blocking it',
+    nearMiss.length > 0 && nearestMiss >= Math.ceil(nearMiss.length / 2),
+    `${nearMiss.length} near misses, ${nearestMiss} exactly one lane clear`);
+  check('cluster width really varies from row to row',
+    widths.size >= 2, `widths ${[...widths].sort((a, b) => a - b).join(', ')} tiles`);
+  check('clusters follow the ship off the world axis',
+    farFromAxis.length >= 8 && trailsShip.length === farFromAxis.length,
+    `${farFromAxis.length} rows spawned past lane 5, all within ${tileCap} lanes of the ship`);
 
   /* --- the barrier is anchored on the lane the ship is *predicted* to hold --- */
   await debugCall(page, 'clearField');
@@ -387,9 +404,9 @@ async function main() {
   check('the live indicator sweeps light red → dark red',
     tones.length > 4 && toneSum(firstTone) > toneSum(lastTone) && firstTone.rgb[0] > lastTone.rgb[0],
     `${firstTone && firstTone.rgb.map((v) => v.toFixed(2)).join('/')} → ${lastTone && lastTone.rgb.map((v) => v.toFixed(2)).join('/')}`);
-  check('the indicator paints every slab of the barrier',
-    tones.every((t) => t.visible === t.slots.length) && firstTone.slots.length >= 1,
-    `${firstTone.slots.length} slab(s) lit`);
+  check('one warning indicator marks the whole row, tile for tile',
+    tones.every((t) => t.visible === 1 && t.tiles === t.slots[0].span) && firstTone.tiles >= 1,
+    `${firstTone.tiles} tile(s) lit by ${firstTone.visible} indicator`);
   check('the indicator laser is tinted by the same ramp',
     tones.some((t) => /^[89a-f]/.test(t.laser)), `laser ${lastTone.laser}`);
   check('the warning length is set from the current speed',
@@ -412,9 +429,19 @@ async function main() {
   check('the floor warning strip lengthens with speed',
     fastTune.stripLength > slowTune.stripLength,
     `${slowTune.stripLength} → ${fastTune.stripLength} world units`);
-  check('the barrier widens with speed',
-    fastTune.halfLanes >= slowTune.halfLanes,
-    `${slowTune.halfLanes} → ${fastTune.halfLanes} lanes each side`);
+  check('a row is capped at five tiles at any speed and difficulty',
+    slowTune.maxTiles === 5 && fastTune.maxTiles === 5 &&
+      slowTune.tiles.every((n) => n >= 1 && n <= 5) &&
+      fastTune.tiles.every((n) => n >= 1 && n <= 5) &&
+      fastTune.maxWidth === 5 * 4.8,
+    `cap ${fastTune.maxTiles} tiles (${fastTune.maxWidth} world units), ` +
+      `draws ${slowTune.tiles.join('–')} early → ${fastTune.tiles.join('–')} late`);
+  check('the drawn row spacing tightens in seconds as difficulty climbs',
+    fastTune.rowDistance / 205 < (slowTune.rowDistance / 46) * 0.6 &&
+      fastTune.burstDistance < fastTune.breatherDistance * 0.5,
+    `${(slowTune.rowDistance / 46).toFixed(2)}s apart at cruise → ` +
+      `${(fastTune.rowDistance / 205).toFixed(2)}s at full speed ` +
+      `(burst ${fastTune.burstDistance} vs breather ${fastTune.breatherDistance} units)`);
 
   // a real procedural barrier, caught mid-warning
   await debugCall(page, 'clearField');

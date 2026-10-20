@@ -11,23 +11,20 @@
 import {
   baseSpeedAt,
   boxesOverlap,
+  chooseTileStart,
   difficultyAt,
-  fullWidthRow,
-  gapLanesAt,
   laneIsFlyableByShip,
-  laneWindowFor,
   makeBox,
-  pickWallRow,
+  pickTileRow,
   playerBox,
   powerupIntervalAt,
-  rowBreathingAt,
-  rowIntervalAt,
+  rowDistanceAt,
   solidDurationAt,
   sphereOverlap,
+  tileCountAt,
+  tileRow,
   toDisplaySpeed,
   wallBox,
-  wallHalfLanes,
-  wallReachLanes,
   warningColorAt,
   warningCssAt,
   warningDistanceAt,
@@ -49,10 +46,7 @@ import {
   candidatesKeepingPocket,
   freeLanes,
   freeWithin,
-  gapRow,
-  liftRow,
   pocketsOf,
-  pocketGapRows,
   selectFairRow,
   sequenceFeasible,
   singleLaneRow,
@@ -94,43 +88,71 @@ check('warning window always leaves reaction time',
   warns[warns.length - 1] >= 0.5, `worst case ${warns[warns.length - 1].toFixed(2)}s`);
 
 const rng = createRandom(1234);
-/** Window sizes the spawner uses across the speed range, in lanes. */
-const LANE_COUNTS = [5, 9, 13, 17, 21, 25, 29];
 
 /* ------------------------------------------------------------------ */
-/* row cadence + the lane-change window                                */
+/* row width: never more than five tiles side by side                  */
 /* ------------------------------------------------------------------ */
-const breathEarly = rowBreathingAt(0);
-const breathLate = rowBreathingAt(1);
-check('the lane-change window shrinks as difficulty climbs',
-  breathLate < breathEarly, `${breathEarly.toFixed(2)}s → ${breathLate.toFixed(2)}s`);
-check('there is always room for a lane change between barriers',
-  transit(0, 1) <= breathLate - FAIRNESS.verifySafety,
-  `1 lane needs ${transit(0, 1).toFixed(2)}s of a ${breathLate.toFixed(2)}s window`);
-check('early barriers leave room for a two-lane change',
-  transit(0, 2) <= breathEarly - FAIRNESS.verifySafety,
-  `2 lanes need ${transit(0, 2).toFixed(2)}s of a ${breathEarly.toFixed(2)}s window`);
+const tileSweep = [];
+for (let difficulty = 0; difficulty <= 1.0001; difficulty += 0.05) {
+  for (let i = 0; i < 80; i += 1) tileSweep.push({ difficulty, tiles: tileCountAt(difficulty, rng) });
+}
+const maxTilesSeen = Math.max(...tileSweep.map((t) => t.tiles));
+const minTilesSeen = Math.min(...tileSweep.map((t) => t.tiles));
+check('a row never stands more than five tiles side by side',
+  tileSweep.every((t) => t.tiles >= 1 && t.tiles <= 5) && maxTilesSeen === 5,
+  `${minTilesSeen}–${maxTilesSeen} tiles (cap ${WALLS.maxTiles})`);
+check('rows are at most as wide as the cap says',
+  WALLS.maxTiles === 5 && WALLS.maxTiles * LANES.width <= 26,
+  `${WALLS.maxTiles} × ${LANES.width} = ${WALLS.maxTiles * LANES.width} world units`);
+const earlyTiles = tileSweep.filter((t) => t.difficulty <= 0.1).map((t) => t.tiles);
+const lateTiles = tileSweep.filter((t) => t.difficulty >= 0.9).map((t) => t.tiles);
+const meanTiles = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+check('rows get wider as the run gets harder (up to the cap)',
+  meanTiles(lateTiles) > meanTiles(earlyTiles) + 0.8,
+  `${meanTiles(earlyTiles).toFixed(2)} → ${meanTiles(lateTiles).toFixed(2)} tiles`);
+check('the early game never throws a five-tile row at the player',
+  Math.max(...earlyTiles) <= 2, `widest early row ${Math.max(...earlyTiles)} tiles`);
+check('the spawner asks for a lane change without ever walling the plane',
+  tileSweep.every((t) => t.tiles < LANES.reach * 2 + 1),
+  `${maxTilesSeen} of ${LANES.reach * 2 + 1} modelled lanes`);
 
-const avgOf = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
-const intervalEarly = [0, 0.1, 0.2].map((d) => rowIntervalAt(d, rng));
-const intervalLate = [0.9, 0.95, 1].map((d) => rowIntervalAt(d, rng));
-check('row cadence tightens with difficulty',
-  avgOf(intervalLate) < avgOf(intervalEarly),
-  `${avgOf(intervalEarly).toFixed(2)}s → ${avgOf(intervalLate).toFixed(2)}s apart`);
-check('consecutive barriers never overlap solidly',
-  [0, 0.5, 1].every((d) => rowIntervalAt(d, rng) >= 2 * solidDurationAt(d)),
-  [0, 0.5, 1].map((d) => `${rowIntervalAt(d, rng).toFixed(2)}s vs ${(2 * solidDurationAt(d)).toFixed(2)}s solid`).join(', '));
-check('the interval always carries the whole breathing window',
-  [0, 0.5, 1].every(
-    (d) => rowIntervalAt(d, rng) >= 2 * solidDurationAt(d) + rowBreathingAt(d) - 1e-9
-  ),
-  [0, 0.5, 1]
-    .map(
-      (d) =>
-        `${rowIntervalAt(d, rng).toFixed(2)}s ≥ ${(2 * solidDurationAt(d) + rowBreathingAt(d)).toFixed(2)}s at difficulty ${d}`
-    )
-    .join(', '));
+/* ------------------------------------------------------------------ */
+/* spacing: distance-driven and chaotic                                */
+/* ------------------------------------------------------------------ */
+const spacingEarly = [];
+const spacingLate = [];
+for (let i = 0; i < 600; i += 1) {
+  spacingEarly.push(rowDistanceAt(0, rng));
+  spacingLate.push(rowDistanceAt(1, rng));
+}
 const mean = (xs) => xs.reduce((a, b) => a + b, 0) / xs.length;
+const spreadOf = (xs) => Math.max(...xs) / Math.min(...xs);
+const meanEarlySeconds = mean(spacingEarly) / SPEED.base;
+const meanLateSeconds = mean(spacingLate) / SPEED.max;
+check('rows arrive more often as the run goes on',
+  meanLateSeconds < meanEarlySeconds * 0.6 && meanEarlySeconds < 4.5,
+  `${meanEarlySeconds.toFixed(2)}s apart at the start → ${meanLateSeconds.toFixed(2)}s at full speed`);
+check('spawn spacing is chaotic, not a fixed interval',
+  spreadOf(spacingEarly) > 2.5 && spreadOf(spacingLate) > 2.5 &&
+    new Set(spacingLate.map((d) => Math.round(d))).size > 100,
+  `spread ${spreadOf(spacingEarly).toFixed(1)}× early, ${spreadOf(spacingLate).toFixed(1)}× late, ` +
+    `${new Set(spacingLate.map((d) => Math.round(d))).size} distinct values`);
+check('the spacing draws mix bursts, ordinary gaps and breathers',
+  (() => {
+    const base = (WALLS.spacing.start + WALLS.spacing.end) / 2;
+    const bursts = spacingLate.filter((d) => d < base * 0.8).length;
+    const breathers = spacingLate.filter((d) => d > base * 1.5).length;
+    return bursts > 60 && breathers > 60;
+  })(),
+  `${spacingLate.filter((d) => d < 130).length} bursts, ${spacingLate.filter((d) => d > 240).length} breathers of ${spacingLate.length}`);
+check('every drawn gap clears the burst floor',
+  spacingEarly.every((d) => d >= WALLS.spacing.start * WALLS.spacing.burst * 0.84 - 1e-9),
+  `shortest ${Math.min(...spacingEarly).toFixed(0)} units`);
+check('the row distance is a distance, not a duration',
+  // the same difficulty draws the same *magnitude* regardless of the clock, so
+  // callers convert it with their own speed rather than reading a timer
+  rowDistanceAt(0.5, () => 0.5) === rowDistanceAt(0.5, () => 0.5),
+  `${rowDistanceAt(0.5, () => 0.5).toFixed(1)} world units per ordinary gap`);
 
 const pu = [0, 0.5, 1].map((d) => powerupIntervalAt(d, rng));
 check('power-ups arrive inside the designed window',
@@ -148,99 +170,78 @@ check('base speed respects the ceiling', baseSpeedAt(10000, 1) <= SPEED.max + 1e
 /* ------------------------------------------------------------------ */
 /* obstacle patterns                                                   */
 /* ------------------------------------------------------------------ */
-let allFree = true;
-let coversWindow = true;
-let gapContiguous = true;
-let slabsContiguous = true;
-let reachOk = true;
-let sawWide = false;
-let previousFree = null;
+const geometryRow = tileRow(-3, 4);
+check('a row is one contiguous run of tiles',
+  geometryRow.span === 4 &&
+    geometryRow.segments.length === 1 &&
+    geometryRow.segments[0].start === -3 &&
+    geometryRow.segments[0].span === 4 &&
+    geometryRow.blocked.join(',') === '-3,-2,-1,0',
+  `lanes ${geometryRow.blocked.join(',')}`);
+check('a row refuses to grow past five tiles',
+  tileRow(0, 9).span === WALLS.maxTiles && tileRow(0, 9).blocked.length === WALLS.maxTiles,
+  `asked for 9, built ${tileRow(0, 9).span}`);
+check('a row is never empty', tileRow(2, 0).span === 1, `${tileRow(2, 0).span} tile`);
+
 const patternRng = createRandom(99);
-
-for (let difficulty = 0; difficulty <= 1.0001; difficulty += 0.05) {
-  for (let i = 0; i < 60; i += 1) {
-    const tight = difficulty > 0.35;
-    const laneCount = LANE_COUNTS[(i + Math.floor(difficulty * 10)) % LANE_COUNTS.length];
-    const row = pickWallRow(patternRng, difficulty, previousFree, tight, laneCount);
-    const gap = row.gap;
-    if (gap.length === 0 || row.free.length === 0) allFree = false;
-    // every window lane is either blocked or part of the gap
-    if (row.blocked.length + gap.length !== laneCount) coversWindow = false;
-    for (let k = 1; k < gap.length; k += 1) if (gap[k] !== gap[k - 1] + 1) gapContiguous = false;
-    if (gap[0] < 0 || gap[gap.length - 1] > laneCount - 1) gapContiguous = false;
-    // each slab is a contiguous run, and there are never more than two of them
-    if (row.segments.length > 2) slabsContiguous = false;
-    for (const seg of row.segments) {
-      for (let k = 1; k < seg.span; k += 1) {
-        if (!row.blocked.includes(seg.start + k)) slabsContiguous = false;
-      }
-      if (seg.span < 1) slabsContiguous = false;
-    }
-    if (row.blocked.length >= 8) sawWide = true;
-    previousFree = gap;
-  }
+let blockedAnchor = 0;
+let nearMiss = 0;
+let maxSpan = 0;
+let farAnchor = 0;
+for (let i = 0; i < 800; i += 1) {
+  const difficulty = (i % 100) / 100;
+  const anchor = i < 400 ? 4 : -9;
+  const row = pickTileRow(patternRng, difficulty, { anchorLane: anchor });
+  maxSpan = Math.max(maxSpan, row.span);
+  if (row.span > WALLS.maxTiles) farAnchor += 1;
+  if (row.blocked.includes(anchor)) blockedAnchor += 1;
+  else if (row.start === anchor + 1 || row.start + row.span - 1 === anchor - 1) nearMiss += 1;
 }
+check('most rows stand on the lane the ship is heading for',
+  blockedAnchor / 800 > 0.6,
+  `${blockedAnchor}/800 rows block the anchor lane`);
+check('some rows slide past one lane beside the ship',
+  nearMiss > 20, `${nearMiss}/800 near misses`);
+check('no generated row is wider than the cap',
+  maxSpan <= WALLS.maxTiles && farAnchor === 0,
+  `widest generated row ${maxSpan} tiles`);
+check('clusters follow the ship far off the world axis',
+  (() => {
+    const row = pickTileRow(createRandom(4242), 1, { anchorLane: -9 });
+    return row.blocked.every((lane) => Math.abs(lane + 9) <= WALLS.maxTiles);
+  })(),
+  'anchor lane -9');
 
-// The "stay tight" rule is a heuristic on a fixed-size window (the window itself
-// only changes when the run speeds up), so it is checked on a constant window.
-let tightPrevious = null;
-const tightRng = createRandom(5150);
-for (let difficulty = 0.4; difficulty <= 1.0001; difficulty += 0.1) {
-  for (let i = 0; i < 40; i += 1) {
-    const row = pickWallRow(tightRng, difficulty, tightPrevious, true, LANES.count);
-    if (tightPrevious && !tightPrevious.some((a) => row.gap.some((b) => Math.abs(a - b) <= 1))) {
-      reachOk = false;
-    }
-    tightPrevious = row.gap;
-  }
+// A reward lane in flight is meant to stay open more often than chance. The lane
+// has to be one the clusters would otherwise sweep, so it sits beside the anchor.
+const preferRng = createRandom(5150);
+const plainRng = createRandom(5150);
+let preferBlocked = 0;
+let plainBlocked = 0;
+for (let i = 0; i < 900; i += 1) {
+  const difficulty = 0.5;
+  if (pickTileRow(preferRng, difficulty, { anchorLane: 0, preferLane: 2 }).blocked.includes(2)) preferBlocked += 1;
+  if (pickTileRow(plainRng, difficulty, { anchorLane: 0 }).blocked.includes(2)) plainBlocked += 1;
 }
-
-check('every wall row leaves at least one open lane (the gap)', allFree);
-check('the barrier covers the whole lane window apart from its gap', coversWindow,
-  `gap ${gapLanesAt(0)} → ${gapLanesAt(1)} lanes`);
-check('the gap is a single contiguous run inside the window', gapContiguous);
-check('barriers are at most two contiguous slabs', slabsContiguous);
-check('wide barriers really do span the play area', sawWide);
-check('tight gaps are always reachable from the previous gap', reachOk);
+check('a reward lane is kept open more often than a random one',
+  preferBlocked < plainBlocked * 0.85 && plainBlocked > 100,
+  `${preferBlocked} vs ${plainBlocked} of 900 rows`);
+check('the reward bias parks the cluster on the far side of the orb lane',
+  // rand 0.1 always fires the bias branch: the orb in lane 1 sits to the right of
+  // the anchor, so all four tiles have to land right of it
+  tileRow(chooseTileStart(() => 0.1, 4, 0, 1), 4).blocked.join(',') === '2,3,4,5',
+  `lanes ${tileRow(chooseTileStart(() => 0.1, 4, 0, 1), 4).blocked.join(',')}`);
+check('the widest row leaves most of the reachable band open',
+  freeWithin(tileRow(0, WALLS.maxTiles).blocked, 0).length === LANES.reach * 2 + 1 - WALLS.maxTiles,
+  `${freeWithin(tileRow(0, WALLS.maxTiles).blocked, 0).length} of ${LANES.reach * 2 + 1} modelled lanes`);
 check('a single lane is wide enough for the ship', laneIsFlyableByShip(),
   `lane ${LANES.width} vs ship ${(SHIP.halfExtents.x * 2).toFixed(2)}`);
 
-/* barrier width + warning scaling are driven by speed ----------------- */
+/* warning scaling is still driven by speed --------------------------- */
 const cruiseFlight = { warnDuration: warningDurationAt(0.5, SPEED.base), solidDuration: solidDurationAt(0.5) };
-const halfAtCruise = wallHalfLanes({ speed: SPEED.base, ...cruiseFlight });
-const halfAtMax = wallHalfLanes({ speed: SPEED.max, ...cruiseFlight });
-check('the barrier widens as the run speeds up', halfAtMax > halfAtCruise,
-  `${halfAtCruise} → ${halfAtMax} lanes each side`);
-check('the barrier always covers at least the reachable band',
-  halfAtCruise >= WALLS.minHalfLanes && halfAtMax <= WALLS.maxHalfLanes,
-  `bounded by ${WALLS.minHalfLanes}..${WALLS.maxHalfLanes} lanes`);
-// The band the ship can cross while a row is in flight is the hard lower bound on
-// the window width: if `WALLS.maxHalfLanes` ever drops below it, the clamp in
-// wallHalfLanes silently ships barriers narrow enough to fly *around*, which is
-// the one thing full-width rows must never allow. Swept over every speed the run
-// can reach (boost tops out at SPEED.max × boostMultiplier) and the whole
-// difficulty curve, not just cruise.
-const reachSweep = [];
-for (const difficulty of [0, 0.25, 0.5, 0.75, 1]) {
-  for (const speed of [SPEED.base, SPEED.base * 2, SPEED.max, SPEED.max * SPEED.boostMultiplier]) {
-    reachSweep.push({
-      difficulty,
-      speed,
-      reach: wallReachLanes({
-        warnDuration: warningDurationAt(difficulty, speed),
-        solidDuration: solidDurationAt(difficulty),
-      }),
-    });
-  }
-}
-const widestReach = reachSweep.reduce((best, r) => (r.reach > best.reach ? r : best), reachSweep[0]);
-check('the widest reachable band always fits inside the window cap',
-  reachSweep.every((r) => r.reach <= WALLS.maxHalfLanes),
-  `worst case ${widestReach.reach} lanes each side at difficulty ${widestReach.difficulty}, ` +
-    `${widestReach.speed.toFixed(0)} u/s (cap ${WALLS.maxHalfLanes})`);
-check('a narrow viewport gets a narrower (cheaper) barrier than a wide one',
-  wallHalfLanes({ speed: SPEED.base, ...cruiseFlight, aspect: 0.5 }) <=
-    wallHalfLanes({ speed: SPEED.base, ...cruiseFlight, aspect: 2.2 }));
+check('a cluster reads the same size however fast the run is',
+  WALLS.maxTiles * LANES.width <= 26 && cruiseFlight.warnDuration > 0.5,
+  `${WALLS.maxTiles * LANES.width} world units wide at any speed`);
 
 check('warning time is unchanged at cruise speed (difficulty still bites)',
   nearly(warningDurationAt(0.37, SPEED.base), warningDurationAt(0.37)),
@@ -397,7 +398,6 @@ check('the spawner never returns a row that blocks every lane',
         rand,
         difficulty: (i % 100) / 100,
         inFlight: [],
-        previousFree: null,
         warnDuration: 1.2,
         solidDuration: 0.9,
       });
@@ -413,7 +413,6 @@ check('the spawner always produces a feasible first row',
       rand,
       difficulty: 1,
       inFlight: [],
-      previousFree: null,
       warnDuration: 0.55,
       solidDuration: 0.7,
     });
@@ -426,30 +425,31 @@ check('single-lane fallbacks keep every pocket lane open',
     return options.length > 0 && options.every((row) => row.free.includes(4));
   })());
 
-/* full-width row geometry --------------------------------------------- */
-const wideRow = fullWidthRow(3, 2, 9);
-check('a full-width row blocks both sides of its gap',
-  wideRow.gap.join(',') === '3,4' &&
-    wideRow.segments.length === 2 &&
-    wideRow.segments[0].start === 0 &&
-    wideRow.segments[1].start + wideRow.segments[1].span === 9,
-  `slabs ${wideRow.segments.map((s) => `${s.start}+${s.span}`).join(' / ')}`);
-check('the gap is open in the actual collision geometry',
-  !boxesOverlap(playerBox(laneCenterX(3), 0.75, 0), wallBox(0, 3, 0)) &&
-    !boxesOverlap(playerBox(laneCenterX(4), 0.75, 0), wallBox(5, 4, 0)) &&
-    boxesOverlap(playerBox(laneCenterX(2), 0.75, 0), wallBox(0, 3, 0)) &&
-    boxesOverlap(playerBox(laneCenterX(5), 0.75, 0), wallBox(5, 4, 0)),
-  'slab boxes leave lanes 3-4 flyable');
+/* tile-row geometry --------------------------------------------------- */
+const cluster = tileRow(3, 4);
+check('a cluster blocks exactly the lanes its tiles stand on',
+  cluster.blocked.join(',') === '3,4,5,6' &&
+    cluster.segments.length === 1 &&
+    nearly(cluster.width, 4 * LANES.width),
+  `${cluster.blocked.length} tiles, ${cluster.width} world units`);
+check('the space beside a cluster is open in the collision geometry',
+  !boxesOverlap(playerBox(laneCenterX(2), 0.75, 0), wallBox(3, 4, 0)) &&
+    !boxesOverlap(playerBox(laneCenterX(7), 0.75, 0), wallBox(3, 4, 0)) &&
+    boxesOverlap(playerBox(laneCenterX(3), 0.75, 0), wallBox(3, 4, 0)) &&
+    boxesOverlap(playerBox(laneCenterX(6), 0.75, 0), wallBox(3, 4, 0)),
+  'lanes 2 and 7 stay flyable past a 4-tile row');
 
 /* fallbacks ------------------------------------------------------------ */
-const heldRow = gapRow({ gapStart: -1, gapWidth: 2, windowBase: -6, laneCount: 13, anchorLane: 0 });
-check('the extreme fallback keeps the lane the ship is holding open',
-  heldRow.gap.includes(0) && heldRow.blocked.length === 11,
-  `gap ${heldRow.gap.join(',')} of ${heldRow.gap.length + heldRow.blocked.length} lanes`);
-check('pocket fallbacks can keep the whole pocket open',
-  pocketGapRows([2, 3], 2, { windowBase: -4, laneCount: 13, gapWidth: 1 }).some(
-    (row) => row.gap.includes(2) && row.gap.includes(3)
-  ));
+check('pocket fallbacks park the cluster outside the safe pocket',
+  (() => {
+    const options = candidatesKeepingPocket([2, 3], 2);
+    return (
+      options.length > 0 &&
+      options.every((row) => row.span <= WALLS.maxTiles) &&
+      options.every((row) => !row.blocked.includes(2) && !row.blocked.includes(3))
+    );
+  })(),
+  `${candidatesKeepingPocket([2, 3], 2).length} candidates`);
 check('the spawner never leaves the ship with nowhere to go',
   (() => {
     const rand = createRandom(31337);
@@ -467,9 +467,8 @@ check('the spawner never leaves the ship with nowhere to go',
         warnDuration: 0.6,
         solidDuration: 0.7,
         anchorLane: 0,
-        laneCount: 13,
       });
-      if (picked.row.free.length === 0 || !picked.row.gap.length) return false;
+      if (picked.row.free.length === 0 || picked.row.span > WALLS.maxTiles) return false;
     }
     return true;
   })());

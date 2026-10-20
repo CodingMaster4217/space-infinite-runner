@@ -98,61 +98,77 @@ export const warningStripLengthAt = (speed = SPEED.base) =>
   clamp(WALLS.strip.base + speed * WALLS.strip.perSpeed, WALLS.strip.base, WALLS.strip.max);
 
 /**
- * Free gap width (in lanes) a full-width row leaves, by difficulty.
- * The barrier is unavoidable, so the gap is the whole game: generous early,
- * thread-the-needle late.
+ * How many tiles a row gets at this difficulty.
+ *
+ * Early rows are a single wall or a pair; the late game draws up to the cap of
+ * five. The result never exceeds `WALLS.maxTiles` — that cap is the whole point
+ * of the row model, so it is asserted directly in `scripts/test-logic.js`.
  */
-export const gapLanesAt = (difficulty = 0) => {
-  const { start, end } = WALLS.gap;
-  const lanes = start - (start - end) * Math.pow(clamp(difficulty, 0, 1), 0.9);
-  return Math.max(1, Math.round(lanes));
+export const tileCountAt = (difficulty = 0, rand = Math.random) => {
+  const d = clamp(difficulty, 0, 1);
+  const { start, end } = WALLS.tiles;
+  const min = Math.round(start.min + (end.min - start.min) * d);
+  const max = Math.round(start.max + (end.max - start.max) * d);
+  const spread = Math.max(0, max - min);
+  return clamp(min + Math.floor(rand() * (spread + 1)), 1, WALLS.maxTiles);
 };
 
 /**
- * The band the ship could physically cross while a row is in flight, in lanes
- * each side of the lane it holds when the row arrives, plus one lane of cushion.
+ * Absolute lane a row of `tiles` tiles starts on.
  *
- * This is the *hard* lower bound on how wide a barrier has to be: anything
- * narrower can be outflown sideways, which is exactly the perimeter exploit
- * full-width rows exist to close. Kept separate from `wallHalfLanes` (which may
- * enlarge the window for looks) so the bound can be asserted against
- * `WALLS.maxHalfLanes` instead of being silently clamped below what it must be.
+ * Three placements keep the pattern from settling into a rhythm:
+ *   - a power-up in flight pulls the cluster to one side so the reward lane
+ *     stays open and collectable;
+ *   - a *near miss* slides past one lane beside the ship, which the player can
+ *     ignore (no steering needed, and no free pass either);
+ *   - a *threat* stands on the lane the ship is heading for. The ship's offset
+ *     inside the cluster is biased towards the near edge, so most rows ask for a
+ *     single-lane move and the deeper placements are the occasional real lane
+ *     change (the fairness guard rejects those when the traffic in flight leaves
+ *     no time).
  */
-export const wallReachLanes = ({ warnDuration, solidDuration } = {}) => {
-  const flight = Math.max(0.2, (warnDuration ?? 1.2) + (solidDuration ?? 0.9));
-  return Math.ceil((SHIP.maxLateralSpeed * flight) / LANES.width) + WALLS.edgeMargin;
+export const chooseTileStart = (rand, tiles, anchorLane, preferLane = null) => {
+  const span = clamp(Math.round(tiles), 1, WALLS.maxTiles);
+
+  if (preferLane !== null && preferLane !== undefined && rand() < 0.32) {
+    return preferLane >= anchorLane ? preferLane + 1 : preferLane - span;
+  }
+
+  if (rand() > WALLS.threatShare) {
+    // near miss: one lane of clearance, or occasionally a wide berth
+    const clear = rand() < 0.7 ? 1 : 2;
+    return rand() < 0.5 ? anchorLane + clear : anchorLane - span - (clear - 1);
+  }
+
+  const into = Math.min(span - 1, Math.floor(Math.pow(rand(), 1.7) * span));
+  return anchorLane - into;
 };
 
 /**
- * How many lanes each side of the ship a wall row must cover.
- *
- * Two constraints are reconciled:
- *   - *reach*: the ship travels up to `maxLateralSpeed × flightTime` while the row
- *     is in flight, so a narrower barrier could simply be outrun sideways;
- *   - *sight*: the barrier should read as filling the play area, so it also covers
- *     half of what the frustum shows at the warning distance.
- *
- * The window is deliberately kept to the smallest span that still satisfies both:
- * a barrier only stays on screen for as long as it sweeps past the ship, so every
- * lane of extra geometry is screen clutter the player has to read on the way in.
+ * A contiguous row of `tiles` wall tiles starting at an absolute lane.
+ * The row is one segment of at most `WALLS.maxTiles` tiles — a local obstacle,
+ * not a barrier across the play area.
  */
-export const wallHalfLanes = ({
-  speed,
-  warnDuration,
-  solidDuration,
-  aspect = 16 / 9,
-  fov = 72,
-} = {}) => {
-  const flight = Math.max(0.2, (warnDuration ?? 1.2) + (solidDuration ?? 0.9));
-  const reachLanes = wallReachLanes({ warnDuration, solidDuration });
-  const depth = Math.max(30, (speed ?? SPEED.base) * flight * 0.5);
-  const halfWidth = depth * Math.tan((fov * Math.PI) / 360) * aspect;
-  const visibleLanes = Math.ceil((halfWidth / LANES.width) * 0.5) + WALLS.edgeMargin;
-  return clamp(Math.max(reachLanes, visibleLanes), WALLS.minHalfLanes, WALLS.maxHalfLanes);
+export const tileRow = (startLane, tiles) => {
+  const span = clamp(Math.round(tiles), 1, WALLS.maxTiles);
+  const start = Math.round(startLane);
+  const blocked = [];
+  for (let i = 0; i < span; i += 1) blocked.push(start + i);
+  return {
+    start,
+    span,
+    tiles: span,
+    blocked,
+    segments: [{ start, span }],
+    width: span * LANES.width,
+  };
 };
 
-/** Lane window (count) implied by a half-width. */
-export const laneWindowFor = (halfLanes) => halfLanes * 2 + 1;
+/** Pick a chaotic tile row for the current difficulty. */
+export const pickTileRow = (rand, difficulty, { anchorLane = 0, preferLane = null } = {}) => {
+  const tiles = tileCountAt(difficulty, rand);
+  return tileRow(chooseTileStart(rand, tiles, anchorLane, preferLane), tiles);
+};
 
 /* ------------------------------------------------------------------ */
 /* warning colour ramp                                                 */
@@ -193,29 +209,25 @@ export const warningCssAt = (progress) => {
 };
 
 /**
- * Clear track between one barrier clearing the ship and the next turning solid.
- * This is the lane-change window the fairness model relies on.
- */
-export const rowBreathingAt = (difficulty) => {
-  const { start, end } = DIFFICULTY.rowBreathing;
-  return start - (start - end) * Math.pow(clamp(difficulty, 0, 1), 0.9);
-};
-
-/**
- * Seconds between obstacle rows.
+ * World distance to travel before the next row is laid down.
  *
- * A barrier is dangerous from the moment it materialises until it has swept past
- * the ship: `2 × solidDuration` seconds on the ship's clock. While it is sweeping
- * it, the ship cannot cross any blocked lane, so the next barrier must not turn
- * solid until then plus a real breathing space — otherwise the ship has no window
- * in which to reach the next gap, and every hole has to sit on the lane it is
- * already flying. Interval = 2 × solid + breathing, with a light jitter that never
- * eats into the window.
+ * Rows are placed by *distance*, not by a timer: they land at irregular points on
+ * the track instead of on a metronome. Three draws share the mix — a tight burst,
+ * an ordinary jittered gap and the occasional long breather — so neither the row
+ * width nor the rhythm ever repeats exactly.
+ *
+ * The base gap widens with difficulty because the ship covers more ground per
+ * second: in world units rows sit further apart, in play they arrive far more
+ * often (≈ 2.9 s apart at the start of a run, under a second at full tilt).
  */
-export const rowIntervalAt = (difficulty, rand = Math.random) => {
-  const solid = solidDurationAt(difficulty);
-  // jitter only ever *adds* time, so the guaranteed window is never eaten into
-  return (2 * solid + rowBreathingAt(difficulty)) * (1 + rand() * 0.08);
+export const rowDistanceAt = (difficulty = 0, rand = Math.random) => {
+  const { start, end, burst, jitter, breather } = WALLS.spacing;
+  const t = Math.pow(clamp(difficulty, 0, 1), 0.9);
+  const base = start + (end - start) * t;
+  const roll = rand();
+  if (roll < 0.22) return base * burst * (0.85 + rand() * 0.3);
+  if (roll < 0.4) return base * breather * (0.9 + rand() * 0.3);
+  return base * (1 - jitter / 2 + rand() * jitter);
 };
 
 /** Seconds between power-up drops (rarer as the run gets faster, but never scarce). */
@@ -224,167 +236,15 @@ export const powerupIntervalAt = (difficulty, rand = Math.random) => {
   return start - (start - end) * difficulty * (0.75 + rand() * 0.5);
 };
 
-/* ------------------------------------------------------------------ */
-/* Obstacle pattern generation                                         */
-/* ------------------------------------------------------------------ */
-
-/** Contiguous runs of a sorted, gap-free lane list. */
-export const runsOf = (lanes) => {
-  const runs = [];
-  let run = null;
-  for (const lane of lanes) {
-    if (run && lane === run.start + run.span) run.span += 1;
-    else {
-      run = { start: lane, span: 1 };
-      runs.push(run);
-    }
-  }
-  return runs;
-};
-
-const nearestFreeDistance = (freeA, freeB) => {
-  let best = Infinity;
-  for (const a of freeA) for (const b of freeB) best = Math.min(best, Math.abs(a - b));
-  return best;
-};
-
-/**
- * Turn a gap position into a whole wall row inside a lane window.
- *
- * The row blocks every lane of the window except the `gap`, so the window reads
- * as one barrier spanning the full play area with a single hole in it (rendered
- * as one or two contiguous segments either side of the hole).
- *
- * @param {number} gapStart window-relative first lane of the gap
- * @param {number} gapWidth lanes left open
- * @param {number} count lanes in the window
- * @returns {{start:number, span:number, blocked:number[], free:number[], segments:{start:number,span:number}[], gap:number[]}}
- */
-export const fullWidthRow = (gapStart, gapWidth, count) => {
-  const width = Math.max(1, Math.min(gapWidth, count - 1));
-  // keep at least `edge` lanes blocked on each side of the hole: a gap flush with
-  // the window edge would leave a lane at the far end of the play area that a
-  // player could simply hug, which is exactly the perimeter exploit to close.
-  const edge = Math.max(1, Math.min(WALLS.edgeMargin, Math.floor((count - width) / 2)));
-  const maxStart = Math.max(0, count - width - edge);
-  const start = Math.max(Math.min(edge, maxStart), Math.min(Math.max(0, gapStart), maxStart));
-  const gap = [];
-  for (let i = 0; i < width; i += 1) gap.push(start + i);
-  const blocked = [];
-  for (let lane = 0; lane < count; lane += 1) if (lane < start || lane >= start + width) blocked.push(lane);
-  const segments = runsOf(blocked);
-  const first = segments.length ? segments[0].start : start;
-  const lastSeg = segments.length ? segments[segments.length - 1] : { start, span: 1 };
-  return {
-    start: first,
-    span: lastSeg.start + lastSeg.span - first,
-    blocked,
-    free: gap.slice(),
-    segments,
-    gap,
-  };
-};
-
-/**
- * Where to put the gap inside a lane window.
- *
- * The window is centred on the lane the ship is *predicted* to hold, and the hole
- * is deliberately never left on that lane. A full-width barrier whose gap sits
- * under the ship is a free pass: a pilot that never touches the controls would
- * coast through the whole run. Instead the hole is pushed to one side of the
- * ship's lane by at least a lane — the barrier asks for a real (short) lane
- * change every single row, and only the two rewards that keep a *specific* lane
- * interesting override that:
- *
- *   - an orb in flight pulls the hole towards itself so the reward stays
- *     collectable through the barrier the player has to thread;
- *   - the previous hole is sometimes continued, which rewards a player who is
- *     already flying the line the last barrier left open.
- */
-const chooseGapStart = (rand, count, gap, previousFree, tightGap, prefer = null) => {
-  const maxStart = Math.max(0, count - gap);
-  const centred = (lane) => Math.max(0, Math.min(maxStart, Math.round(lane - (gap - 1) / 2)));
-  // lane the row is anchored on: the ship's own lane inside this window
-  const ship = Math.floor(count / 2);
-
-  if (prefer !== null && prefer !== undefined && rand() < 0.55) return centred(prefer);
-
-  // Sometimes continue the lane that was open last row. It is deliberately a
-  // bias and not a rule: if the gap always followed the previous one, a ship that
-  // never steers would sit in a straight tube for ever — exactly the perimeter
-  // exploit full-width barriers exist to close.
-  if (previousFree && previousFree.length && rand() < (tightGap ? 0.35 : 0.25)) {
-    const target = previousFree.reduce((best, lane) =>
-      Math.abs(lane - ship) < Math.abs(best - ship) ? lane : best
-    , previousFree[0]);
-    return centred(target);
-  }
-
-  // Otherwise the hole is pushed off the ship's lane: pick a side, then how many
-  // lanes of travel the row demands. One lane is the bread-and-butter demand;
-  // two or three are the occasional real lane change (the fairness guard rejects
-  // them when the walls in flight leave no time, and retries).
-  const side = rand() < 0.5 ? -1 : 1;
-  const away = 1 + (rand() < 0.3 ? 1 : 0) + (rand() < 0.08 ? 1 : 0);
-  // the whole hole has to clear `ship`: left of it, or right of it
-  const start = side < 0 ? ship - away - gap + 1 : ship + away;
-  return Math.max(0, Math.min(maxStart, start));
-};
-
-/**
- * Pick a full-width wall row.
- *
- * @param {() => number} rand
- * @param {number} difficulty 0..1
- * @param {number[]|null} previousFree window-relative lanes that were open last row
- * @param {boolean} tightGap require the gap to stay adjacent to the previous one
- * @param {number} laneCount lanes the barrier spans (grows with speed)
- * @param {number|null} gapWidth lanes left open (defaults to the difficulty curve)
- * @param {number|null} prefer window-relative lane to weight the gap towards
- * @returns {{start:number, span:number, blocked:number[], free:number[], segments:{start:number,span:number}[], gap:number[], reach:number}} lanes
- */
-export function pickWallRow(
-  rand,
-  difficulty,
-  previousFree = null,
-  tightGap = false,
-  laneCount = LANES.count,
-  gapWidth = null,
-  prefer = null
-) {
-  const count = Math.max(3, Math.round(laneCount));
-  const gap = Math.max(1, Math.min(Math.round(gapWidth ?? gapLanesAt(difficulty)), count - 2));
-
-  let best = null;
-  for (let attempt = 0; attempt < 16; attempt += 1) {
-    const row = fullWidthRow(chooseGapStart(rand, count, gap, previousFree, tightGap, prefer), gap, count);
-    row.reach = previousFree ? nearestFreeDistance(previousFree, row.free) : Infinity;
-    if (row.reach <= 1) {
-      best = row;
-      break;
-    }
-    // nothing satisfies the tight rule (the window may have moved on since the
-    // last row): keep the tightest attempt so the pattern still trends inward
-    if (!best || row.reach < best.reach) best = row;
-  }
-
-  if (!best) {
-    best = fullWidthRow(Math.floor((count - gap) / 2), gap, count);
-    best.reach = Infinity;
-  }
-  return best;
-}
-
 /** Guarantees at least one lane of breathing room for the ship. */
 export const laneIsFlyableByShip = () => LANES.width > SHIP.halfExtents.x * 2.4;
 
 /**
- * Seconds a wall stays solid as it sweeps past the ship.
+ * Seconds a cluster stays solid as it sweeps past the ship.
  *
- * Shorter than it used to be: the sweep time is what makes a barrier feel like a
- * slab rather than a gate, and it also sets the barrier's lateral footprint (see
- * `wallReachLanes`). Trimming it shrinks the wall *and* tightens the row cadence,
- * because the interval between rows is derived from it.
+ * Kept short: this is the part of the flight a tile can actually hit the hull, so
+ * it sets how long the player has to be clear of a row rather than merely how
+ * long it is visible on the way in.
  */
 export const solidDurationAt = (difficulty) => 0.8 - 0.26 * clamp(difficulty, 0, 1);
 

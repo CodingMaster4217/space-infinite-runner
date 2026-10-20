@@ -27,34 +27,38 @@ export const CORRIDOR = {
 /**
  * Wall hazards.
  *
- * Every row is a *full-width barrier*: it covers the whole play area around the
- * ship — the band it could physically reach plus everything visible beside it —
- * and leaves exactly one free gap. Holding left or right therefore cannot escape
- * a row; the only way through is the gap, which the fairness model guarantees is
- * reachable in time.
+ * A row is a *cluster of wall tiles* — one tile per lane, at most
+ * `maxTiles` of them standing side by side — placed near the lane the ship is
+ * heading for. The ship flies around a cluster instead of threading a hole in a
+ * field-wide barrier, so a row is a local obstacle, not a wall across the screen.
+ *
+ * Both the size and the cadence are chaotic on purpose: the row width is drawn
+ * per row, and rows are laid down every *distance* (not every N seconds) with a
+ * three-way draw that mixes tight bursts, ordinary gaps and long breathers.
  */
 export const WALLS = {
-  /** lanes covered beyond the band the ship could physically reach */
-  edgeMargin: 1,
-  /** a row never covers less than this many lanes each side of the ship */
-  minHalfLanes: 5,
+  /** Hard cap: no row ever stands more than five tiles side by side. */
+  maxTiles: 5,
+  /** tiles per row, eased from `start` (sparse) to `end` (dense), inclusive */
+  tiles: { start: { min: 1, max: 2 }, end: { min: 2, max: 5 } },
+  /** world units shaved off each tile so neighbours read as separate walls */
+  seam: 0.34,
   /**
-   * ...and never more: past this the extra geometry buys no gameplay, it is just
-   * more wall to read on the way in. Must stay at or above `wallReachLanes` for
-   * the worst case (the widest reachable band, at boost speed), or a barrier
-   * would be narrow enough to fly around — asserted in `scripts/test-logic.js`.
+   * Slab profile of a single tile, in world units. Deliberately small: a tile is
+   * barely taller than the hull and one lane wide, so a five-tile row is still a
+   * cluster the player can read and fly around at speed.
    */
-  maxHalfLanes: 12,
+  size: { height: 2.05, thickness: 1.25 },
   /**
-   * Slab profile of one solid barrier segment, in world units. Kept modest on
-   * purpose: the barrier is already the full width of the play area, so a tall
-   * slab reads as a wall across the whole screen instead of a gate to thread.
-   * Sized just above the ship (hull half-height 0.52 at y = 0.75) so the gap stays
-   * legible at speed.
+   * World distance between rows, in units travelled — the spawner is driven by
+   * distance, not a timer, so the spacing is regular only if this function is.
+   * A three-way draw (burst / jitter / breather) keeps it from ever reading as a
+   * metronome: `burst` and `breather` are multipliers on the base gap, `jitter`
+   * is the half-width of the ordinary draw.
    */
-  size: { height: 2.4, thickness: 1.5 },
-  /** free gap width in lanes, eased from `start` (easy) to `end` (hard) */
-  gap: { start: 3, end: 1.4 },
+  spacing: { start: 108, end: 176, burst: 0.6, jitter: 0.5, breather: 1.85 },
+  /** share of rows placed to block the lane the ship is heading for */
+  threatShare: 0.78,
   /**
    * World-space lookahead the warning phase must extend down the track. It grows
    * with speed, so the faster the run the further ahead the barrier is announced.
@@ -66,9 +70,8 @@ export const WALLS = {
   speedWarningGain: 0.55,
   /**
    * Ceiling on that stretch, in seconds. The warning *distance* still grows with
-   * speed; this caps how long the barrier hangs in the air, which in turn caps
-   * the band the ship could cross while it is in flight (and therefore the
-   * barrier's width — see `wallReachLanes`).
+   * speed; this only caps how long a cluster hangs in the air before it lands, so
+   * the screen never fills with more than a couple of warnings at once.
    */
   warningStretchCap: 2.2,
   /** warning indicator colours: light red → dark red → deepest red */
@@ -128,26 +131,6 @@ export const DIFFICULTY = {
   fullAtDistance: 9000,
   /** reaction window on the warning, eased from `start` (easy) to `end` (hard) */
   warning: { start: 1.8, end: 0.55 },
-  /**
-   * Clear track between the end of one barrier and the next one turning solid,
-   * in seconds.
-   *
-   * This is the *lane-change window*, and it is what makes a full-width barrier a
-   * game rather than a rail: while a barrier is sweeping past the ship it cannot
-   * cross any blocked lane, so the hole in the next barrier is only reachable if
-   * this window is at least a lane transit long. `scripts/fairness.js` proves the
-   * generated sequence stays inside it.
-   *
-   * Kept tight on purpose: it and `solidDurationAt` set the row cadence
-   * (`rowIntervalAt` = 2 × solid + this), so shrinking it is what makes barriers
-   * arrive more often. The floor is a one-lane transit (0.46 s) plus the
-   * verifier's slack, asserted in `scripts/test-logic.js`.
-   */
-  rowBreathing: { start: 0.92, end: 0.56 },
-  /** minimum distance between consecutive rows, in world units */
-  minRowGap: 34,
-  /** documented bound on how much of a lane window a single row may block */
-  maxBlockedShare: 0.8,
 };
 
 /**

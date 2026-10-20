@@ -19,7 +19,7 @@
  */
 
 import { FAIRNESS, LANES, SHIP, laneCenterX } from './config.js';
-import { fullWidthRow, gapLanesAt, pickWallRow } from './collision.js';
+import { pickTileRow, tileRow } from './collision.js';
 import { clamp } from './utils.js';
 
 export const LANE_COUNT = LANES.count;
@@ -290,40 +290,6 @@ export function singleLaneRow(lane, centre = lane, radius = LANES.reach) {
 }
 
 /**
- * Lift a window-relative row onto the unbounded lane line.
- *
- * The window is `laneCount` lanes wide and centred on the ship's lane, so the
- * barrier always brackets the ship wherever it is flying.
- */
-export function liftRow(lifted, windowBase, anchorLane, radius = LANES.reach) {
-  const blocked = lifted.blocked.map((lane) => windowBase + lane);
-  const segments = lifted.segments.map((s) => ({ start: windowBase + s.start, span: s.span }));
-  const last = segments.length ? segments[segments.length - 1] : { start: windowBase, span: 1 };
-  return {
-    ...lifted,
-    start: segments.length ? segments[0].start : windowBase,
-    span: last.start + last.span - (segments.length ? segments[0].start : windowBase),
-    blocked,
-    segments,
-    gap: (lifted.gap || []).map((lane) => windowBase + lane),
-    free: freeWithin(blocked, anchorLane, radius),
-  };
-}
-
-/** A full-width row whose gap sits at `gapStart` (absolute lanes). */
-export function gapRow({
-  gapStart,
-  gapWidth,
-  windowBase,
-  laneCount,
-  anchorLane,
-  radius = LANES.reach,
-}) {
-  const local = fullWidthRow(gapStart - windowBase, gapWidth, laneCount);
-  return liftRow(local, windowBase, anchorLane, radius);
-}
-
-/**
  * Last-resort patterns: single-lane walls that leave every lane of `pocket`
  * open, so the ship can hold its safe corridor with zero lateral movement.
  */
@@ -340,78 +306,38 @@ export function candidatesKeepingPocket(pocket, centre = pocket[0] ?? 0) {
 }
 
 /**
- * Fallback gaps: keep the ship's own pocket open. Widening the gap to the whole
- * pocket means a ship already inside it survives without moving at all, which is
- * exactly the guarantee the spawner must never lose.
- */
-export function pocketGapRows(pocket, anchorLane, { windowBase, laneCount, gapWidth, radius = LANES.reach }) {
-  const sorted = [...pocket].sort((a, b) => a - b);
-  const spans = new Set([gapWidth, 2, 3]);
-  const anchors = new Set([anchorLane]);
-  if (sorted.length) {
-    anchors.add(sorted[0]);
-    anchors.add(sorted[sorted.length - 1]);
-    // the ship can be anywhere in its pocket, so keep the whole pocket open
-    spans.add(Math.min(sorted.length, 3));
-  }
-  const rows = [];
-  for (const span of spans) {
-    if (span < 1) continue;
-    for (const anchor of anchors) {
-      if (sorted.length && !sorted.some((lane) => lane >= anchor - span + 1 && lane <= anchor + span - 1)) continue;
-      rows.push(
-        gapRow({
-          gapStart: anchor - Math.min(span - 1, Math.floor(span / 2)),
-          gapWidth: span,
-          windowBase,
-          laneCount,
-          anchorLane,
-          radius,
-        })
-      );
-    }
-  }
-  return rows;
-}
-
-/**
- * Pick an obstacle row that is guaranteed dodgeable given everything already in
+ * Pick a wall cluster that is guaranteed dodgeable given everything already in
  * flight.
  *
- * The row spans the full play area around the ship (see `wallHalfLanes`) so it
- * cannot be escaped by holding a direction, and is validated with the shared
- * fairness model. If the difficulty-scaled patterns cannot be made safe, the
- * fallbacks keep the ship's own pocket open, which is dodgeable by definition.
+ * A row is at most `WALLS.maxTiles` tiles wide and is placed near the lane the
+ * ship is heading for (see `chooseTileStart`), so it is a local obstacle the ship
+ * flies around rather than a barrier with a hole. Every candidate is checked with
+ * the shared fairness model: the ship has to be able to sit in a lane that is
+ * open for every row solid at that moment, and to reach it in the time available.
+ *
+ * If the difficulty-scaled placements cannot be made safe, the fallbacks park the
+ * cluster just outside the ship's own safe pocket, which by definition leaves a
+ * ship that is already flying legally untouched.
  */
 export function selectFairRow({
   rand,
   difficulty,
   inFlight = [],
-  previousFree = null,
   warnDuration,
   solidDuration,
   /** lane the ship will be flying in when this row turns solid */
   anchorLane = 0,
-  attempts = 14,
+  attempts = 16,
   safety = FAIRNESS.safety,
-  laneCount = LANE_COUNT,
-  gapWidth = null,
-  /** absolute lane the gap should favour (a power-up the player should reach) */
+  /** absolute lane a reward is sitting in; the cluster is biased to leave it open */
   preferLane = null,
   radius = LANES.reach,
 }) {
-  const count = Math.max(3, Math.round(laneCount));
-  const gap = clamp(Math.round(gapWidth ?? gapLanesAt(difficulty)), 1, count - 2);
-  const windowBase = anchorLane - Math.floor(count / 2);
   const candidateArrival = warnDuration + solidDuration;
   const candidate = {
     materialiseIn: candidateArrival - solidDuration,
     arrivalIn: candidateArrival,
   };
-
-  const windowPattern = (free) =>
-    free ? free.map((lane) => lane - windowBase).filter((l) => l >= 0 && l < count) : null;
-  const prefer = preferLane === null ? null : preferLane - windowBase;
 
   const feasible = (row, extraAttempts) => {
     const verdict = sequenceFeasible([...inFlight, { ...candidate, free: row.free }], {
@@ -423,39 +349,37 @@ export function selectFairRow({
       : verdict;
   };
 
+  const place = (row) => {
+    row.anchorLane = anchorLane;
+    row.free = freeWithin(row.blocked, anchorLane, radius);
+    return row;
+  };
+
   let lastVerdict = null;
-  let pattern = previousFree;
   for (let attempt = 0; attempt < attempts; attempt += 1) {
-    const picked = pickWallRow(rand, difficulty, windowPattern(pattern), difficulty > 0.35, count, gap, prefer);
-    const row = liftRow(picked, windowBase, anchorLane, radius);
-    row.reach = picked.reach;
+    const row = place(pickTileRow(rand, difficulty, { anchorLane, preferLane }));
     const outcome = feasible(row, attempt + 1);
     if (outcome.row) return outcome;
     lastVerdict = outcome;
-    pattern = row.free;
   }
 
   const openNow = sequenceFeasible(inFlight, { safety, requireAllStartPockets: true });
   const pocket = openNow.pockets.length ? openNow.pockets[0] : freeWithin([], anchorLane, radius);
-  const options = pocketGapRows(pocket, anchorLane, { windowBase, laneCount: count, gapWidth: gap, radius });
+  const options = candidatesKeepingPocket(pocket, anchorLane);
   for (let i = 0; i < options.length; i += 1) {
-    const outcome = feasible(options[i], attempts + i + 1);
+    const row = place(options[i]);
+    row.tiles = row.span;
+    row.segments = [{ start: row.start, span: row.span }];
+    const outcome = feasible(row, attempts + i + 1);
     if (outcome.row) return { ...outcome, fallback: true };
     lastVerdict = outcome;
   }
 
-  // extreme fallback: the barrier covers everything except the lane the ship is
-  // holding, so a ship that keeps its heading always survives this row
-  const held = gapRow({
-    gapStart: anchorLane - Math.min(gap - 1, Math.floor(gap / 2)),
-    gapWidth: gap,
-    windowBase,
-    laneCount: count,
-    anchorLane,
-    radius,
-  });
+  // last resort: one tile parked beyond the modelled band, which cannot trap a
+  // ship holding its own lane
+  const parked = place(tileRow(anchorLane + radius, 1));
   return {
-    row: held,
+    row: parked,
     attempts: attempts + options.length + 1,
     fallback: true,
     verdict: lastVerdict,

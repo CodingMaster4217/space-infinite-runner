@@ -33,15 +33,13 @@ import {
   baseSpeedAt,
   boxesOverlap,
   difficultyAt,
-  gapLanesAt,
-  laneWindowFor,
   playerBox,
   powerupIntervalAt,
-  rowIntervalAt,
+  rowDistanceAt,
   solidDurationAt,
   sphereOverlap,
+  tileCountAt,
   toDisplaySpeed,
-  wallHalfLanes,
   warningColorAt,
   warningDistanceAt,
   warningDurationAt,
@@ -213,9 +211,9 @@ export class Game {
     this.brakeTimer = 0;
     this.invulnTimer = 0;
     this.shieldCharges = 0;
-    this.spawnTimer = 1.35;
+    this.spawnDistance = WALLS.spacing.start * 0.55;
+    this.spawnDistances = [];
     this.powerupTimer = 4.5;
-    this._lastFreeLanes = null;
     this._lastSwooshSign = 0;
     this.fairnessRelaxations = 0;
     this.lastRowVerdict = null;
@@ -431,17 +429,13 @@ export class Game {
   _onWallWarning(wall, { row }) {
     this.run.warnings += 1;
     const shipLane = this._shipLane();
-    // A full-width row is described by its gap (the only way through); test and
-    // debug rows that have no gap are described by the lanes they occupy.
-    const hasGap = Boolean(row.gap && row.gap.length);
-    const lanes = hasGap ? row.gap : row.blocked || [];
+    // A row is described by the lanes its tiles stand on, relative to the ship.
+    const lanes = row.blocked || [];
     const offsets = lanes.map((lane) => lane - shipLane);
     const label = offsets.map((o) => (o > 0 ? `+${o}` : `${o}`)).join(',');
     const holds = offsets.includes(0) ? ' ⚠ in your lane' : '';
     this.ui.alert(
-      hasGap
-        ? `⚠ Wall inbound · gap at lane${offsets.length > 1 ? 's' : ''} ${label}${holds}`
-        : `⚠ Wall inbound · lane${offsets.length > 1 ? 's' : ''} ${label}${holds}`,
+      `⚠ Wall inbound · ${lanes.length} tile${lanes.length > 1 ? 's' : ''} at lane${offsets.length > 1 ? 's' : ''} ${label}${holds}`,
       'warn',
       Math.min(1.8, wall.warnDuration + 0.4)
     );
@@ -449,14 +443,13 @@ export class Game {
   }
 
   /**
-   * Spawn one wall row.
+   * Spawn one wall cluster.
    *
-   * The barrier spans the whole play area around the ship — the band it could
-   * reach while the row is in flight, plus the visible width beside it — and
-   * leaves a single free gap. Because there is nothing to fly around, the row is
-   * anchored on the lane the ship is *predicted* to hold when it turns solid, so
-   * simply holding a direction cannot be used to stay clear. Every candidate is
-   * validated with the shared fairness model before it ships.
+   * A row is one to `WALLS.maxTiles` tiles standing side by side (never more than
+   * five), placed near the lane the ship is *predicted* to hold when the tiles
+   * turn solid. The width is drawn per row and the placement alternates between
+   * threats, near misses and reward-friendly offsets, so no two rows read alike.
+   * Every candidate is validated with the shared fairness model before it ships.
    */
   _spawnWall() {
     const difficulty = this.difficulty;
@@ -465,16 +458,6 @@ export class Game {
     const solidDuration = solidDurationAt(difficulty);
     const flight = warnDuration + solidDuration;
     const warnLength = warningStripLengthAt(speed);
-
-    // how wide the barrier has to be, in lanes each side of the ship
-    const halfLanes = wallHalfLanes({
-      speed,
-      warnDuration,
-      solidDuration,
-      aspect: this.camera.aspect,
-      fov: this.camera.fov,
-    });
-    const laneCount = laneWindowFor(halfLanes);
     const anchorLane = this._predictedLane(flight);
 
     // everything still ahead of the ship, expressed in seconds from now
@@ -490,35 +473,30 @@ export class Game {
       })
       .sort((a, b) => a.materialiseIn - b.materialiseIn);
 
-    // if a power-up is in flight, bias the gap towards it so the reward stays
-    // collectable through the barrier the player has to thread
+    // if a power-up is in flight, bias the cluster to one side so the reward lane
+    // stays open on the way in
     const orb = this.powerupManager.orbs.find((o) => o.active && o.group.position.z < 0);
 
     const picked = selectFairRow({
       rand: this.rng,
       difficulty,
       inFlight,
-      previousFree: this._lastFreeLanes,
       warnDuration,
       solidDuration,
       anchorLane,
-      laneCount,
-      gapWidth: gapLanesAt(difficulty),
       preferLane: orb ? laneIndexAt(orb.group.position.x) : null,
     });
 
     if (picked.fallback) this.fairnessRelaxations = (this.fairnessRelaxations || 0) + 1;
-    this._lastFreeLanes = picked.row.free;
     this.lastRowVerdict = picked;
     this.lastLayout = {
-      halfLanes,
-      laneCount,
       anchorLane,
       shipLane: this._shipLane(),
-      gapWidth: picked.row.gap ? picked.row.gap.length : 0,
-      gap: picked.row.gap || null,
+      tiles: picked.row.span,
+      maxTiles: WALLS.maxTiles,
       segments: picked.row.segments || [],
       blockedLanes: picked.row.blocked ? picked.row.blocked.length : 0,
+      width: picked.row.span * LANES.width,
       coverage: picked.row.blocked
         ? {
             left: anchorLane - Math.min(...picked.row.blocked),
@@ -537,21 +515,24 @@ export class Game {
     });
   }
 
-  /** The hole in the nearest incoming barrier — the lane the ship is heading for. */
-  _gapLaneAhead() {
+  /** The open lane beside the nearest incoming cluster — where a reward can sit. */
+  _openLaneAhead() {
     const rows = this.obstacles.walls
-      .filter((w) => w.active && w.phase === 'warn' && w.gap && w.gap.length)
+      .filter((w) => w.active && w.phase === 'warn' && w.freeLanes && w.freeLanes.length)
       .sort((a, b) => b.group.position.z - a.group.position.z);
     if (!rows.length) return null;
-    const gap = rows[0].gap;
+    const free = rows[0].freeLanes;
     const shipLane = this._shipLane();
-    return gap.reduce((best, lane) => (Math.abs(lane - shipLane) < Math.abs(best - shipLane) ? lane : best), gap[0]);
+    return free.reduce(
+      (best, lane) => (Math.abs(lane - shipLane) < Math.abs(best - shipLane) ? lane : best),
+      free[0]
+    );
   }
 
   _spawnPowerup() {
-    // Orbs drop in the gap the ship has to fly through, so they stay collectable
-    // now that every barrier spans the play area.
-    const lane = this._gapLaneAhead() ?? this._predictedLane(2);
+    // Orbs drop in the open lane beside the next cluster, so threading the row is
+    // also the line that collects the reward.
+    const lane = this._openLaneAhead() ?? this._predictedLane(2);
     // never drop an orb straight into a wall that is already in flight
     const blocked = this.obstacles.walls.some(
       (w) => w.active && (w.blockedLanes || []).includes(lane)
@@ -818,14 +799,14 @@ export class Game {
 
     /* --- spawns ------------------------------------------------------ */
     if (this.spawningEnabled) {
-      this.spawnTimer -= dt;
-      if (this.spawnTimer <= 0) {
+      // rows are laid down by *distance travelled*, not by a timer: the spacing is
+      // a chaotic draw (burst / jitter / breather), so it is never a metronome
+      this.spawnDistance -= travel;
+      if (this.spawnDistance <= 0) {
         this._spawnWall();
-        // the interval itself carries the lane-change window (see rowIntervalAt)
-        this.spawnTimer = Math.max(
-          rowIntervalAt(difficulty, this.rng),
-          DIFFICULTY.minRowGap / Math.max(20, this.speed)
-        );
+        this.spawnDistance = rowDistanceAt(difficulty, this.rng);
+        this.spawnDistances.push(Math.round(this.spawnDistance));
+        if (this.spawnDistances.length > 64) this.spawnDistances.shift();
       }
 
       this.powerupTimer -= dt;
@@ -1098,11 +1079,8 @@ export class Game {
     clearField: () => {
       this.obstacles.reset();
       this.powerupManager.reset();
-      this.spawnTimer = 4;
+      this.spawnDistance = WALLS.spacing.start;
       this.powerupTimer = 6;
-      // the next row is the first of a new field, so it must not try to continue
-      // a lane pattern from before the reset
-      this._lastFreeLanes = null;
     },
     /** Toggle the procedural spawner (verification + cinematic capture). */
     setSpawning: (on = true) => {
@@ -1169,8 +1147,8 @@ export class Game {
     placeOrb: (type = 'shield', laneOffset = 0) =>
       this.powerupManager.spawn(type, this._shipLane() + laneOffset, 0.5),
     /**
-     * Spawn one procedural row through the real spawner and report the barrier it
-     * built: window size, anchor lane, gap, and the slabs either side of it.
+     * Spawn one procedural row through the real spawner and report the cluster it
+     * built: how many tiles, where they stand, and the boxes a collision tests.
      */
     spawnProceduralRow: () => {
       const before = this.obstacles.walls.length;
@@ -1182,7 +1160,7 @@ export class Game {
         laneStart: wall.laneStart,
         laneSpan: wall.laneSpan,
         blockedLanes: wall.blockedLanes.slice(),
-        gapLanes: (wall.gap || []).slice(),
+        freeLanes: (wall.freeLanes || []).slice(),
         warnDuration: wall.warnDuration,
         solidDuration: wall.solidDuration,
         warnLength: wall.warnLength,
@@ -1193,31 +1171,30 @@ export class Game {
     },
     /**
      * The hazard geometry the spawner would use right now, without spawning: how
-     * wide the barrier must be, and how far ahead the warning reaches.
+     * many tiles a row may stand, how wide it can get, and how far ahead the
+     * warning reaches.
      */
     wallTuning: (speed = Math.max(20, this.speed), difficulty = this.difficulty) => {
       const warnDuration = warningDurationAt(difficulty, speed);
       const solidDuration = solidDurationAt(difficulty);
-      const halfLanes = wallHalfLanes({
-        speed,
-        warnDuration,
-        solidDuration,
-        aspect: this.camera.aspect,
-        fov: this.camera.fov,
-      });
       return {
         speed: Number(speed.toFixed(2)),
         difficulty: Number(difficulty.toFixed(3)),
         warnDuration: Number(warnDuration.toFixed(3)),
         solidDuration: Number(solidDuration.toFixed(3)),
         lookahead: Number(warningDistanceAt(difficulty, speed).toFixed(1)),
-        halfLanes,
-        laneCount: laneWindowFor(halfLanes),
-        gapWidth: gapLanesAt(difficulty),
+        maxTiles: WALLS.maxTiles,
+        tiles: [tileCountAt(difficulty, () => 0), tileCountAt(difficulty, () => 0.999)],
+        maxWidth: WALLS.maxTiles * LANES.width,
+        rowDistance: Number(rowDistanceAt(difficulty, () => 0.5).toFixed(1)),
+        burstDistance: Number(rowDistanceAt(difficulty, () => 0.1).toFixed(1)),
+        breatherDistance: Number(rowDistanceAt(difficulty, () => 0.3).toFixed(1)),
         stripLength: Number(warningStripLengthAt(speed).toFixed(1)),
         spawnZ: Number((-(warnDuration + solidDuration) * speed).toFixed(1)),
       };
     },
+    /** The world gaps the live spawner drew between its most recent rows. */
+    spawnDistances: () => this.spawnDistances.slice(),
     /** The light-red → dark-red warning ramp, sampled for verification. */
     warningRamp: (samples = 5) =>
       Array.from({ length: samples + 1 }, (_, i) => {
@@ -1237,23 +1214,24 @@ export class Game {
         .map((w) => ({
           progress: Number(this.obstacles.warningProgress.toFixed(3)),
           rgb: [w.warningColor?.r ?? -1, w.warningColor?.g ?? -1, w.warningColor?.b ?? -1],
-          strip: w.slots[0].stripMaterial.uniforms.uColor.value.getHexString(),
-          laser: w.slots[0].laserMaterial.color.getHexString(),
+          strip: w.warn.stripMaterial.uniforms.uColor.value.getHexString(),
+          laser: w.warn.laserMaterial.color.getHexString(),
           stripLength: Number(w.warnLength.toFixed(2)),
           slots: w.segments.map((s) => ({ start: s.start, span: s.span })),
-          visible: w.slots.filter((s) => s.active && s.warn.visible).length,
+          tiles: w.tiles.filter((t) => t.active).length,
+          visible: w.warn.group.visible ? 1 : 0,
         })),
     /** Slab boxes of the barriers a collision would test, for the gap test. */
     wallBoxes: () =>
       this.obstacles.walls.map((w) => ({
         phase: w.phase,
         z: Number(w.group.position.z.toFixed(2)),
-        gap: w.gap ? w.gap.slice() : null,
         blockedLanes: (w.blockedLanes || []).slice(),
         laneStart: w.laneStart,
         laneSpan: w.laneSpan,
+        tiles: w.tiles.filter((t) => t.active).length,
         popT: Number((w.popT || 0).toFixed(3)),
-        slabScaleZ: Number((w.slots[0].slab.scale.z || 1).toFixed(3)),
+        slabScaleZ: Number((w.tiles[0].slab.scale.z || 1).toFixed(3)),
         boxes: this.obstacles.boxesFor(w).map((b) => ({
           cx: Number(b.cx.toFixed(3)),
           hx: Number(b.hx.toFixed(3)),
@@ -1297,14 +1275,14 @@ export class Game {
   _forceSolid(wall) {
     wall.phase = 'solid';
     wall.popT = 0;
-    for (const slot of wall.slots) {
-      if (!slot.active) continue;
-      slot.warn.visible = false;
-      slot.slab.visible = true;
-      slot.faces.forEach((f) => {
+    wall.warn.group.visible = false;
+    for (const tile of wall.tiles) {
+      if (!tile.active) continue;
+      tile.slab.visible = true;
+      tile.faces.forEach((f) => {
         f.visible = true;
       });
-      slot.edgeMaterial.opacity = 0.75;
     }
+    wall.edgeMaterial.opacity = 0.75;
   }
 }

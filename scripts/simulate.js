@@ -14,17 +14,14 @@ import {
   baseSpeedAt,
   boxesOverlap,
   difficultyAt,
-  gapLanesAt,
-  laneWindowFor,
   playerBox,
-  rowIntervalAt,
+  rowDistanceAt,
   solidDurationAt,
   wallBox,
-  wallHalfLanes,
   warningDurationAt,
 } from '../src/collision.js';
 import { selectFairRow } from '../src/fairness.js';
-import { LANES, SHIP, laneCenterX, laneIndexAt } from '../src/config.js';
+import { LANES, SHIP, WALLS, laneCenterX, laneIndexAt } from '../src/config.js';
 import { clamp, createRandom } from '../src/utils.js';
 
 const args = process.argv.slice(2);
@@ -49,7 +46,7 @@ function traceLine(t, ship, wall, decision, decisionAt) {
   return (
     `    t=${t.toFixed(2)}s ship.x=${ship.x.toFixed(2)} (lane ${laneIndexAt(ship.x)}) ` +
     `target=${decision ? decision.desiredX.toFixed(2) : '—'}` +
-    `${decision ? ` armed@${decisionAt.toFixed(2)}s` : ''} ` +
+    `${decision && decisionAt !== undefined ? ` armed@${decisionAt.toFixed(2)}s` : ''} ` +
     `| nearest wall lanes ${wall ? `${wall.start}..${wall.start + wall.span - 1}` : '—'} ` +
     `z=${wall ? wall.z.toFixed(1) : '—'} ` +
     `ttImpact=${wall ? Math.max(0, -wall.z / Math.max(1, wall.speed)).toFixed(2) : '—'}s ` +
@@ -77,16 +74,16 @@ function timeToReach(ship, targetX) {
   return t;
 }
 
-/** Lanes that a barrier blocks (it spans the play area apart from its gap). */
+/** Lanes a cluster's tiles stand on. */
 const rowBlocks = (wall, lane) => wall.blocked.includes(lane);
 
 /**
- * Collision boxes of a barrier: one per slab, leaving the gap open. `sweep` is the
- * distance covered this step, so a fast wall cannot pass through the ship between
- * frames (same continuous test the renderer-side game uses).
+ * Collision boxes of a cluster: one per tile, so the space beside it is open.
+ * `sweep` is the distance covered this step, so a fast row cannot pass through the
+ * ship between frames (same continuous test the renderer-side game uses).
  */
 const rowBoxes = (wall, z, sweep = 0) =>
-  wall.segments.map((s) => wallBox(s.start, s.span, z - sweep / 2, 2.2 + sweep));
+  wall.segments.map((s) => wallBox(s.start, s.span, z - sweep / 2, WALLS.size.thickness + sweep));
 
 /** Look-ahead horizon (seconds) the pilot refuses to be blocked inside. */
 let NEAR_TERM = 1.1;
@@ -95,10 +92,10 @@ let NEAR_TERM = 1.1;
 const SCAN = LANES.count + 1;
 
 /**
- * Human-like pilot: read the warning the game shows, then fly for the hole in the
- * barrier that arrives next, committing only once the hole is reachable in time.
- * Myopic on purpose (fixed reaction delay, real lateral physics, capped lookahead)
- * so the numbers it produces are a lower bound on playability.
+ * Human-like pilot: read the warning the game shows, then fly for the open lane
+ * beside the cluster that arrives next, committing only once it is reachable in
+ * time. Myopic on purpose (fixed reaction delay, real lateral physics, capped
+ * lookahead) so the numbers it produces are a lower bound on playability.
  */
 function chooseLane(walls, ship, speed) {
   const upcoming = walls
@@ -115,8 +112,8 @@ function chooseLane(walls, ship, speed) {
   const horizon = Math.min(NEAR_TERM, target.warn + target.solid);
   if (target.tt > horizon && !rowBlocks(target, current)) return hold;
 
-  // aim for the reachable hole, nearest first
-  const holes = (target.gap.length ? target.gap : target.free)
+  // aim for the reachable open lane, nearest first
+  const holes = target.free
     .slice()
     .sort((a, b) => Math.abs(a - current) - Math.abs(b - current));
   for (const lane of holes) {
@@ -144,8 +141,7 @@ function simulate(seed, pilot = 'greedy', holdDir = -1) {
   let elapsed = 0;
   let topSpeed = 0;
   let difficulty = 0;
-  let spawnTimer = 1.35;
-  let previousFree = null;
+  let spawnDistance = 90;
   let walls = [];
   let deaths = 0;
   let closestMargin = Infinity;
@@ -175,11 +171,10 @@ function simulate(seed, pilot = 'greedy', holdDir = -1) {
     elapsed += DT;
 
     /* spawn ---------------------------------------------------------- */
-    spawnTimer -= DT;
-    if (spawnTimer <= 0) {
+    spawnDistance -= travel;
+    if (spawnDistance <= 0) {
       const warn = warningDurationAt(difficulty, speed);
       const solid = solidDurationAt(difficulty);
-      const halfLanes = wallHalfLanes({ speed, warnDuration: warn, solidDuration: solid });
       const ahead = walls
         .filter((w) => w.z < 0)
         .map((w) => {
@@ -197,21 +192,16 @@ function simulate(seed, pilot = 'greedy', holdDir = -1) {
         rand,
         difficulty,
         inFlight: ahead,
-        previousFree,
         warnDuration: warn,
         solidDuration: solid,
         anchorLane,
-        laneCount: laneWindowFor(halfLanes),
-        gapWidth: gapLanesAt(difficulty),
       });
       const row = picked.row;
-      previousFree = row.free;
       walls.push({
         start: row.start,
         span: row.span,
         segments: row.segments,
         blocked: row.blocked,
-        gap: row.gap,
         free: row.free,
         z: -(warn + solid) * speed,
         warn,
@@ -220,7 +210,7 @@ function simulate(seed, pilot = 'greedy', holdDir = -1) {
         announced: false,
         born: elapsed,
       });
-      spawnTimer = Math.max(rowIntervalAt(difficulty, rand), 34 / Math.max(20, speed));
+      spawnDistance = rowDistanceAt(difficulty, rand);
     }
 
     /* move walls + react --------------------------------------------- */
@@ -286,7 +276,7 @@ function simulate(seed, pilot = 'greedy', holdDir = -1) {
             solid: wall.solid,
             laneStart: wall.start,
             laneSpan: wall.span,
-            gap: wall.gap.slice(),
+            open: wall.free.slice(0, 6),
             shipLane: laneIndexAt(ship.x),
           };
         }
@@ -346,11 +336,11 @@ if (PILOT === 'stubborn' || PILOT === 'straight') {
       `  longest survival                : ${distances[distances.length - 1]} m\n` +
       (first && first.firstFailure
         ? `  first crash                     : t=${first.firstFailure.t.toFixed(1)}s, ship lane ` +
-          `${first.firstFailure.shipLane}, gap lanes ${first.firstFailure.gap.join(',')}, ` +
-          `barrier spanning ${first.firstFailure.laneSpan} lanes\n`
+          `${first.firstFailure.shipLane}, cluster of ${first.firstFailure.laneSpan} tile(s) ` +
+          `at lanes ${first.firstFailure.laneStart}..${first.firstFailure.laneStart + first.firstFailure.laneSpan - 1}\n`
         : '') +
       `\n${died === probe.length ? 'PASS' : 'FAIL'} — there is no unpunished perimeter: holding a ` +
-      `direction runs into a full-width barrier.\n`
+      `direction runs into the clusters the spawner keeps putting on that lane.\n`
   );
   process.exit(died === probe.length ? 0 : 1);
 }
@@ -426,7 +416,8 @@ for (const probe of probes) {
       `median survival ${median(distances)} m` +
       (firstCrash && firstCrash.firstFailure
         ? ` (first crash t=${firstCrash.firstFailure.t.toFixed(1)}s, ship lane ` +
-          `${firstCrash.firstFailure.shipLane}, gap ${firstCrash.firstFailure.gap.join(',')})\n`
+          `${firstCrash.firstFailure.shipLane}, ${firstCrash.firstFailure.laneSpan} tiles at ` +
+          `lane ${firstCrash.firstFailure.laneStart})\n`
         : '\n')
   );
 }
@@ -438,8 +429,8 @@ const ok = medianDistance >= MEDIAN_BAR && probesPunished;
 process.stdout.write(
   `\n${ok ? 'PASS' : 'FAIL'} — a deliberately myopic pilot (greedy ${LOOKAHEAD}s lookahead, ` +
     `${REACTION}s reaction) reaches a median of ${medianDistance} m (difficulty ~${medianDifficulty.toFixed(2)}),\n` +
-    `and neither perimeter probe survives: holding a direction is not a safe spot because every\n` +
-    `barrier spans the play area around the ship.\n` +
+    `and neither perimeter probe survives: holding a direction is not a safe spot because the\n` +
+    `spawner keeps placing clusters on the lane the ship is heading for.\n` +
     `Note: this is a playability lower bound, not a fairness bound — scripts/fairness.js proves with\n` +
     `the engine's own guard module that an exact dodge path exists for every generated sequence.\n`
 );

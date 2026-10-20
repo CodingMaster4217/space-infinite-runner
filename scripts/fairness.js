@@ -6,8 +6,8 @@
  * game makes) over a long flight, then checks the resulting obstacle timeline
  * with the shared fairness model, seeded from the ship's starting lane.
  *
- * A sequence passes only if, for every wall row, a lane exists that is open for
- * every wall solid at that moment, and the ship can always reach the next safe
+ * A sequence passes only if, for every cluster, a lane exists that is open for
+ * every row solid at that moment, and the ship can always reach the next safe
  * pocket in the gap available.
  *
  *   node scripts/fairness.js [--seconds 600] [--safety 0.06] [--seed 12345]
@@ -16,15 +16,11 @@
 import {
   baseSpeedAt,
   difficultyAt,
-  gapLanesAt,
-  laneWindowFor,
-  rowBreathingAt,
-  rowIntervalAt,
+  rowDistanceAt,
   solidDurationAt,
-  wallHalfLanes,
   warningDurationAt,
 } from '../src/collision.js';
-import { FAIRNESS, LANES, laneCenterX } from '../src/config.js';
+import { FAIRNESS, LANES, WALLS, laneCenterX } from '../src/config.js';
 import { freeLanes, selectFairRow, sequenceFeasible, TRANSITION } from '../src/fairness.js';
 import { createRandom } from '../src/utils.js';
 
@@ -46,10 +42,12 @@ function generateRows(seed, seconds) {
   const rand = createRandom(seed);
   const rows = [];
   const inFlight = [];
+  const spacings = [];
+  const spacingSpeeds = [];
   let elapsed = 0;
   let distance = 0;
-  let spawnTimer = 1.35;
-  let previousFree = null;
+  // rows are laid down by distance travelled, exactly like the game does
+  let spawnDistance = WALLS.spacing.start * 0.6;
   let relaxations = 0;
   let totalAttempts = 0;
 
@@ -62,11 +60,10 @@ function generateRows(seed, seconds) {
 
     for (const wall of inFlight) wall.z += travel;
 
-    spawnTimer -= DT;
-    if (spawnTimer <= 0) {
+    spawnDistance -= travel;
+    if (spawnDistance <= 0) {
       const warnDuration = warningDurationAt(difficulty, speed);
       const solidDuration = solidDurationAt(difficulty);
-      const halfLanes = wallHalfLanes({ speed, warnDuration, solidDuration });
       const ahead = inFlight
         .filter((w) => w.z < 0)
         .map((w) => {
@@ -79,35 +76,30 @@ function generateRows(seed, seconds) {
         })
         .sort((a, b) => a.materialiseIn - b.materialiseIn);
 
-      // The verifier parks a virtual ship in lane 0 and never steers it, so
-      // every row is anchored on that lane (the real game anchors on the lane the
-      // ship is predicted to hold). That makes this the strictest case there is:
-      // the barrier spans the play area and the gap has to be reachable anyway.
+      // The verifier parks a virtual ship in lane 0 and never steers it, so every
+      // row is anchored on that lane (the real game anchors on the lane the ship
+      // is predicted to hold). That makes this the strictest case there is: the
+      // clusters keep standing on the lane the verifier holds.
       const picked = selectFairRow({
         rand,
         difficulty,
         inFlight: ahead,
-        previousFree,
         warnDuration,
         solidDuration,
         safety: GUARD_SAFETY,
         anchorLane: 0,
-        laneCount: laneWindowFor(halfLanes),
-        gapWidth: gapLanesAt(difficulty),
       });
       totalAttempts += picked.attempts;
       if (picked.fallback) relaxations += 1;
-      previousFree = picked.row.free;
 
       inFlight.push({
         start: picked.row.start,
         span: picked.row.span,
+        tiles: picked.row.span,
         blocked: picked.row.blocked,
         segments: picked.row.segments,
-        gap: picked.row.gap,
         // the verifier's virtual ship holds lane 0, so rows anchor there
         anchorLane: 0,
-        halfLanes,
         free: picked.row.free,
         predicted: {
           materialise: elapsed + warnDuration,
@@ -124,7 +116,9 @@ function generateRows(seed, seconds) {
         materialise: null,
       });
 
-      spawnTimer = Math.max(rowIntervalAt(difficulty, rand), 34 / Math.max(20, speed));
+      spawnDistance = rowDistanceAt(difficulty, rand);
+      spacings.push(spawnDistance);
+      spacingSpeeds.push(speed);
     }
 
     for (const wall of inFlight) {
@@ -139,12 +133,12 @@ function generateRows(seed, seconds) {
     }
   }
 
-  return { rows, relaxations, totalAttempts };
+  return { rows, relaxations, totalAttempts, spacings, spacingSpeeds };
 }
 
 /* ------------------------------------------------------------------ */
 
-const { rows, relaxations, totalAttempts } = generateRows(SEED, SECONDS);
+const { rows, relaxations, totalAttempts, spacings, spacingSpeeds } = generateRows(SEED, SECONDS);
 
 const timeline = rows.map((r) => ({
   free: r.free,
@@ -160,17 +154,19 @@ const verdict = sequenceFeasible(timeline, {
 const maxDifficulty = Math.max(...rows.map((r) => r.difficulty));
 const maxSpeed = Math.max(...rows.map((r) => r.speed));
 const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
-const avgHalf = mean(rows.map((r) => r.halfLanes));
-const avgGap = mean(rows.map((r) => r.gap.length));
+const std = (xs) => {
+  const m = mean(xs);
+  return Math.sqrt(mean(xs.map((x) => (x - m) ** 2)));
+};
+const tiles = rows.map((r) => r.blocked.length);
 const widths = rows.map((r) => r.blocked.length * LANES.width);
-const blockingShipLane = rows.filter((r) => !r.gap.includes(0)).length;
-const twoSlab = rows.filter((r) => (r.segments || []).length > 1).length;
-// a gap flush with the window edge would leave a lane at the far end of the play
-// area to hide in, so the generator keeps wall on both sides of every hole
-const edgeGaps = rows.filter((r) => {
-  const base = r.anchorLane - r.halfLanes;
-  return r.gap[0] === base || r.gap[r.gap.length - 1] === base + r.halfLanes * 2;
-}).length;
+const overCap = rows.filter((r) => r.blocked.length > WALLS.maxTiles).length;
+const blockingShipLane = rows.filter((r) => r.blocked.includes(0)).length;
+const multiTile = rows.filter((r) => r.blocked.length > 1).length;
+const singleTile = rows.filter((r) => r.blocked.length === 1).length;
+const spacingsSorted = [...spacings].sort((a, b) => a - b);
+// world distance between rows converted to seconds at the speed that drew it
+const secondsApart = spacings.map((d, i) => d / Math.max(1, spacingSpeeds[i]));
 
 process.stdout.write('HYPERDRIVE spawner fairness verification\n\n');
 process.stdout.write(
@@ -178,15 +174,19 @@ process.stdout.write(
     `  difficulty reached      : ${maxDifficulty.toFixed(3)} (${Math.round(maxSpeed * 21)} km/h)\n` +
     `  pattern attempts per row: ${(totalAttempts / Math.max(1, rows.length)).toFixed(2)} (fairness retries)\n` +
     `  relaxed rows            : ${relaxations} (${((relaxations / Math.max(1, rows.length)) * 100).toFixed(1)}%)\n` +
-    `  barrier span            : ${avgHalf.toFixed(1)} lanes each side of the ship ` +
-    `(${Math.min(...widths).toFixed(0)}–${Math.max(...widths).toFixed(0)} world units of wall per row)\n` +
-    `  free gap                : ${avgGap.toFixed(2)} lanes on average\n` +
-    `  two-slab barriers       : ${twoSlab} of ${rows.length} (hole in the middle of the play area)\n` +
-    `  gaps flush to an edge   : ${edgeGaps} of ${rows.length}\n` +
+    `  tiles per row           : ${Math.min(...tiles)}–${Math.max(...tiles)} (mean ${mean(tiles).toFixed(2)}, ` +
+    `cap ${WALLS.maxTiles})\n` +
+    `  rows over the tile cap  : ${overCap}\n` +
+    `  row width               : ${Math.min(...widths).toFixed(0)}–${Math.max(...widths).toFixed(0)} world units ` +
+    `(max ${WALLS.maxTiles * LANES.width})\n` +
+    `  single-tile / clusters  : ${singleTile} single, ${multiTile} multi-tile\n` +
     `  rows blocking lane 0    : ${blockingShipLane} of ${rows.length} ` +
     `(${((blockingShipLane / Math.max(1, rows.length)) * 100).toFixed(1)}% — holding one lane is punished)\n` +
+    `  spawn spacing (world)   : ${spacingsSorted[0].toFixed(0)}–${spacingsSorted[spacingsSorted.length - 1].toFixed(0)} units, ` +
+    `mean ${mean(spacings).toFixed(0)}, sd ${std(spacings).toFixed(0)} (chaotic, not a metronome)\n` +
+    `  spawn spacing (time)    : ${Math.min(...secondsApart).toFixed(2)}–${Math.max(...secondsApart).toFixed(2)}s apart\n` +
     `  lane travel matrix      : 1 lane ${TRANSITION[0][1].toFixed(2)}s, 2 lanes ${TRANSITION[0][2].toFixed(2)}s, 4 lanes ${TRANSITION[0][4].toFixed(2)}s\n` +
-    `  lane space              : unbounded (barriers anchored to the ship, ${LANES.reach} lanes of reach modelled)\n`
+    `  lane space              : unbounded (clusters anchored to the ship, ${LANES.reach} lanes of reach modelled)\n`
 );
 
 if (verdict.feasible) {
@@ -225,13 +225,13 @@ if (!verdict.feasible && DEBUG) {
 
 const laneFree = freeLanes(0, 1);
 process.stdout.write(
-  `\n  sanity: single-lane rows in a 5-lane window leave ${laneFree.join(',')} open; ` +
+  `\n  sanity: a single tile blocks 1 of ${laneFree.length + 1} lanes; ` +
     `lane centres ${[-2, -1, 0, 1, 2].map((l) => laneCenterX(l)).join(' ')}; ` +
-    `gap width ${gapLanesAt(0)} lanes at difficulty 0 → ${gapLanesAt(1)} at difficulty 1\n`
+    `max row width ${WALLS.maxTiles} lanes (${WALLS.maxTiles * LANES.width} world units)\n`
 );
 
 process.stdout.write(
-  `\n${verdict.feasible ? 'PASS' : 'FAIL'} — every generated barrier sequence has a physical dodge ` +
-    `path up to difficulty ${maxDifficulty.toFixed(2)}, despite every row spanning the play area.\n`
+  `\n${verdict.feasible ? 'PASS' : 'FAIL'} — every generated cluster sequence has a physical dodge ` +
+    `path up to difficulty ${maxDifficulty.toFixed(2)}, with no row ever wider than ${WALLS.maxTiles} tiles.\n`
 );
 process.exit(verdict.feasible ? 0 : 1);
