@@ -90,11 +90,17 @@ const HAZARD_FRAG = /* glsl */ `
   }
 
   void main() {
-    float stripe = step(0.5, fract((vUv.x * 1.6 + vUv.y) * 5.0));
-    float grid = max(lineMask(vUv.x, 3.0, 0.05), lineMask(vUv.y, 3.0, 0.05));
-    float sweep = pow(1.0 - fract(vUv.y * 1.5 - uTime * 0.8), 4.0);
-    vec3 col = mix(uColor, uColorB, stripe * 0.65) + grid * 0.9 + sweep * 0.6;
-    float alpha = 0.34 + grid * 0.4 + sweep * 0.3 + stripe * 0.1;
+    // The grid is sampled from an inset uv: a line landing on uv 0/1 would draw
+    // a pale rectangle around every tile.
+    vec2 uv = 0.07 + vUv * 0.86;
+    float stripe = step(0.5, fract((uv.x * 1.6 + uv.y) * 5.0));
+    float grid = max(lineMask(uv.x, 3.0, 0.05), lineMask(uv.y, 3.0, 0.05));
+    float sweep = pow(1.0 - fract(uv.y * 1.5 - uTime * 0.8), 4.0);
+    // keep the lines in hue — adding plain white here reads as a white edge
+    vec3 col = mix(uColor, uColorB, stripe * 0.65) + uColorB * grid * 0.5 + uColor * sweep * 0.3;
+    float rim = smoothstep(0.0, 0.16, vUv.x) * smoothstep(0.0, 0.16, 1.0 - vUv.x)
+              * smoothstep(0.0, 0.16, vUv.y) * smoothstep(0.0, 0.16, 1.0 - vUv.y);
+    float alpha = (0.34 + grid * 0.4 + sweep * 0.3 + stripe * 0.1) * rim;
     gl_FragColor = vec4(col, clamp(alpha, 0.0, 1.0));
   }
 `;
@@ -135,13 +141,14 @@ export class ObstacleManager {
     const group = new THREE.Group();
 
     // shared per wall: a cluster is one object to the renderer, however many
-    // tiles stand in it
+    // tiles stand in it. Low metalness on purpose — a polished top face mirrors
+    // the pale key light and reads as a light edge along the top of every tile.
     const slabMaterial = new THREE.MeshStandardMaterial({
       color: COLORS.wall,
       emissive: 0x4a0d28,
-      emissiveIntensity: 0.9,
-      metalness: 0.72,
-      roughness: 0.42,
+      emissiveIntensity: 1.05,
+      metalness: 0.05,
+      roughness: 0.95,
       transparent: true,
       opacity: 0.96,
     });
